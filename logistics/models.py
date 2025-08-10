@@ -37,7 +37,7 @@ USED_FOR_TRANSPORT_COMPANY = (
 def contractor_storage(instance, filename):
     ext = filename.split(".")[-1]
     uuid_filename = "{}.{}".format(uuid.uuid4(), ext)
-    #return "contractor_storage/{0}".format(uuid_filename)
+    # return "contractor_storage/{0}".format(uuid_filename)
     return f'contractor_storage/contractor_{instance.name}/{uuid_filename}'
 
 
@@ -151,23 +151,23 @@ class TransportApplicationQuerySet(
 
     def get_average_delivery_price(self):
         return (
-            self.aggregate(
-                average_price=Avg("approved_logistics_offer__amount")
-            )["average_price"]
-            or 0.0
+                self.aggregate(
+                    average_price=Avg("approved_logistics_offer__amount")
+                )["average_price"]
+                or 0.0
         )
 
     def get_total_delivery_sum(self):
         return (
-            self.aggregate(total_sum=Sum("approved_logistics_offer__amount"))[
-                "total_sum"
-            ]
-            or 0.0
+                self.aggregate(total_sum=Sum("approved_logistics_offer__amount"))[
+                    "total_sum"
+                ]
+                or 0.0
         )
 
     def get_total_weight(self):
         return (
-            self.aggregate(total_weight=Sum("weight"))["total_weight"] or 0.0
+                self.aggregate(total_weight=Sum("weight"))["total_weight"] or 0.0
         )
 
     def get_completed(self):
@@ -175,14 +175,14 @@ class TransportApplicationQuerySet(
 
 
 class TransportApplication(DeliveryFieldsModelMixin, BaseModel):
-    sender = models.CharField("Отправитель", max_length=64)
-    recipient = models.CharField("Получатель", max_length=64)
+    sender = models.CharField("Отправитель", max_length=512)  # длина была 64
+    recipient = models.CharField("Получатель", max_length=512)  # длина была 64
     status = get_field_from_choices(
         "Статус",
         TransportApplicationStatus,
         default=TransportApplicationStatus.AGREEMENT,
     )
-    cargo_type = models.CharField("Характер груза", max_length=32)
+    cargo_type = models.CharField("Характер груза", max_length=512)  # длина была 32
     loading_type = get_field_from_choices("Формат погрузки", LoadingType)
     weight = models.FloatField("Вес (кг.)")
 
@@ -302,15 +302,14 @@ class LogisticsOffer(BaseNameModel):
         Declines all other logistic offers on TransportApplication
         """
         all_other_offers = self.application.offers.all().exclude(pk=self.pk)
-
         all_other_offers.update(status=LogisticOfferStatus.DECLINED)
 
     def save(
-        self,
-        force_insert=False,
-        force_update=False,
-        using=None,
-        update_fields=None,
+            self,
+            force_insert=False,
+            force_update=False,
+            using=None,
+            update_fields=None,
     ):
         is_created = True if self.pk is None else False
         super().save(force_insert, force_update, using, update_fields)

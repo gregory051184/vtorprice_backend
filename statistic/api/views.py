@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Q
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import filters
@@ -32,7 +32,7 @@ from statistic.api.models import (
     ExchangeVolume,
 )
 from statistic.api.serializers import RecyclablesStatisticsSerializer, RecyclablesAppStatisticsSerializer, \
-    MainPageRecyclableSerializer
+    MainPageRecyclableSerializer, ShortRecyclablesAppStatisticsSerializer
 from user.api.serializers import UserSerializer
 from user.models import UserRole
 from drf_yasg import openapi as api
@@ -77,6 +77,8 @@ class StatisticsViewSet(GenericViewSet):
             return RecyclablesFilterSet
         if self.action == "recyclables_applications_price":
             return ApplicationsRecyclablesFilterSet
+        if self.action == "short_recyclables_applications_price":
+            return ApplicationsRecyclablesFilterSet
 
         return FilterSet
 
@@ -100,9 +102,11 @@ class StatisticsViewSet(GenericViewSet):
         if self.action == "recyclables_applications_price":
             return Recyclables.objects.annotate_applications()
 
-        if self.action == "main_page_statistics":
+        if self.action == "short_recyclables_applications_price":
             return Recyclables.objects.annotate_applications()
 
+        if self.action == "main_page_statistics":
+            return Recyclables.objects.annotate_applications()
 
     def filter_queryset(self, queryset):
         queryset = super().filter_queryset(queryset)
@@ -113,7 +117,7 @@ class StatisticsViewSet(GenericViewSet):
     # utlis
     @staticmethod
     def _get_count_graph_data(
-        TruncClass, qs, field_to_truncate='created_at'#"delivery_date"
+            TruncClass, qs, field_to_truncate='created_at'  # "delivery_date"
     ) -> list[dict]:
         truncated_applications = qs.annotate(
             truncated_date=TruncClass(field_to_truncate)
@@ -148,7 +152,6 @@ class StatisticsViewSet(GenericViewSet):
         period = validate_period(request.query_params.get("period", "all"))
         serializer_context = self.get_serializer_context()
         serializer_context["lower_date_bound"] = get_lower_date_bound(period)
-
         data = RecyclablesStatisticsSerializer(
             recyclables, many=True, context=serializer_context
         )
@@ -165,11 +168,30 @@ class StatisticsViewSet(GenericViewSet):
             )
         ]
     )
+    @action(methods=["get"], detail=False)
+    def short_recyclables_applications_price(self, request):
+        recyclables = self.filter_queryset(self.get_queryset().prefetch_related('category'))
+        period = validate_period(request.query_params.get("period", "all"))
+        get_truncation_class(period)
+        serializer_context = self.get_serializer_context()
+        serializer_context["lower_date_bound"] = get_lower_date_bound(period)
+        if (request.query_params.get("deal_type")):
+            deal_type = request.query_params.get("deal_type")
+            serializer_context["deal_type"] = deal_type
+
+            data = ShortRecyclablesAppStatisticsSerializer(
+                recyclables, many=True, context=serializer_context
+            )
+            return Response(data.data)
+        else:
+            data = ShortRecyclablesAppStatisticsSerializer(recyclables, many=True)
+            return Response(data.data)
 
     # ДОБАВИЛ ДЛЯ СТАТИСТИКИ ТЕКУЩИХ ЗАЯВОК И ЦЕН
     @action(methods=["get"], detail=False)
     def recyclables_applications_price(self, request):
-        recyclables = self.filter_queryset(self.get_queryset())
+        recyclables = self.filter_queryset(
+            self.get_queryset())
         period = validate_period(request.query_params.get("period", "all"))
 
         TruncClass = get_truncation_class(period)
@@ -189,10 +211,8 @@ class StatisticsViewSet(GenericViewSet):
                 recyclables, many=True, context=serializer_context
             )
             for i in data.data:
-
                 i['total'] = total
                 i['graph'] = graph_data.dict()
-
                 i['deal_type'] = int(deal_type)
                 response.append(i)
             return Response(response)
@@ -200,29 +220,26 @@ class StatisticsViewSet(GenericViewSet):
             data = RecyclablesAppStatisticsSerializer(recyclables, many=True)
 
             for i in data.data:
-
                 i['total'] = total
                 i['graph'] = graph_data.dict()
-
                 response.append(i)
             return Response(response)
 
-    #ендпоинт статистики для главной странице
+    # ендпоинт статистики для главной странице
     @action(methods=["get"], detail=False)
     def main_page_statistics(self, request):
 
         recyclables = self.filter_queryset(self.get_queryset())
         period = validate_period(request.query_params.get("period", "all"))
 
-        #TruncClass = get_truncation_class(period)
-        #graph_points = self._get_count_graph_data(TruncClass, recyclables, "created_at")
+        # TruncClass = get_truncation_class(period)
+        # graph_points = self._get_count_graph_data(TruncClass, recyclables, "created_at")
         serializer_context = self.get_serializer_context()
         serializer_context["lower_date_bound"] = get_lower_date_bound(period)
 
         data = MainPageRecyclableSerializer(recyclables, many=True, context=serializer_context)
 
         return Response(data.data)
-
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -315,7 +332,6 @@ class StatisticsViewSet(GenericViewSet):
         response = TotalCompanies(total=total, recycling_count=recycling_count)
 
         return Response(response.dict())
-
 
     @swagger_auto_schema(
         manual_parameters=[

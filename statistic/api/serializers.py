@@ -63,6 +63,12 @@ class RecyclablesStatisticsSerializer(ExchangeRecyclablesSerializer):
         return -1
 
 
+class ShortRecyclablesAppStatisticsSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = Recyclables
+        fields = ("id", "category", "name")
+
+
 # ДОБАВИЛ СЕРИАЛАЙЗЕР ДЛЯ recyclables_applications_price
 class RecyclablesAppStatisticsSerializer(NonNullDynamicFieldsModelSerializer):
     application_recyclable_status = serializers.IntegerField(read_only=True)
@@ -74,8 +80,67 @@ class RecyclablesAppStatisticsSerializer(NonNullDynamicFieldsModelSerializer):
     deviation_percent = serializers.SerializerMethodField(read_only=True)
     deviation = serializers.SerializerMethodField(read_only=True)
 
+    purchase_ready_for_shipment_total_volume = serializers.SerializerMethodField(read_only=True)
+    sales_ready_for_shipment_total_volume = serializers.SerializerMethodField(read_only=True)
+    purchase_supply_contract_total_volume = serializers.SerializerMethodField(read_only=True)
+    sales_supply_contract_total_volume = serializers.SerializerMethodField(read_only=True)
+    supply_contracts_prices = serializers.SerializerMethodField(read_only=True)
+    ready_for_shipment_prices = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Recyclables
+
+    def get_supply_contracts_prices(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=2, deal_type=1,
+                                                    recyclables__id=obj.id).order_by("created_at")[0:2]
+        result = list(map(lambda app: int(app.price), lst))
+        prices_dict = {}
+        if len(result) > 0:
+            prices_dict["last_price"] = result[0]
+            if (len(result) > 1):
+                prices_dict["pre_last_price"] = result[1]
+            if (len(result) == 1):
+                prices_dict["pre_last_price"] = 0
+        else:
+            prices_dict["last_price"] = 0
+            prices_dict["pre_last_price"] = 0
+        return prices_dict
+
+    def get_ready_for_shipment_prices(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=1, deal_type=1,
+                                                    recyclables__id=obj.id).order_by("created_at")[0:2]
+        result = list(map(lambda app: int(app.price), lst))
+        prices_dict = {}
+        if len(result) > 0:
+            prices_dict["last_price"] = result[0]
+            if (len(result) > 1):
+                prices_dict["pre_last_price"] = result[1]
+            if (len(result) == 1):
+                prices_dict["pre_last_price"] = 0
+        else:
+            prices_dict["last_price"] = 0
+            prices_dict["pre_last_price"] = 0
+        return prices_dict
+
+    def get_purchase_ready_for_shipment_total_volume(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=1, deal_type=1, recyclables__id=obj.id)
+        result = map(lambda app: int(app.full_weigth) / 1000, lst)
+        return sum(result)
+
+    def get_sales_ready_for_shipment_total_volume(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=1, deal_type=2, recyclables__id=obj.id)
+        result = map(lambda app: int(app.full_weigth) / 1000, lst)
+        return sum(result)
+
+    def get_purchase_supply_contract_total_volume(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=2, deal_type=1, recyclables__id=obj.id)
+        result = map(lambda app: int(app.volume) / 1000, lst)
+        return sum(result)
+
+    def get_sales_supply_contract_total_volume(self, obj):
+        lst = RecyclablesApplication.objects.filter(urgency_type=2, deal_type=2, recyclables__id=obj.id)
+        result = map(lambda app: int(app.volume) / 1000, lst)
+        return sum(result)
 
     def get_latest_deal_price(self, instance: Recyclables):
         try:
@@ -145,6 +210,7 @@ class RecyclablesAppStatisticsSerializer(NonNullDynamicFieldsModelSerializer):
         if deviation_percent > 0:
             return 1
         return -1
+
 
 # ДОБАВИЛ СЕРИАЛАЙЗЕР ДЛЯ main_page_recyclable
 class MainPageRecyclableSerializer(NonNullDynamicFieldsModelSerializer):

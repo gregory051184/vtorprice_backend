@@ -1,5 +1,4 @@
 import json
-from collections import Counter
 
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Q
@@ -28,7 +27,7 @@ from chat.models import Chat
 from common.filters import FavoriteFilterBackend
 from common.subscribe_services.create_payment import create_payment_for_special_app
 from common.subscribe_services.payment_acceptance import payment_acceptance_special_application
-from common.utils import generate_random_sequence
+from common.utils import generate_random_sequence, equals_application_and_request, equals_deal_and_request
 from common.views import (
     MultiSerializerMixin,
     ImagesMixin,
@@ -49,7 +48,6 @@ from document_generator.models import (
 from exchange.api.serializers import (
     CreateRecyclablesApplicationSerializer,
     RecyclablesApplicationSerializer,
-    ExchangeRecyclablesSerializer,
     RecyclablesDealSerializer,
     CreateRecyclablesDealSerializer,
     CreateReviewSerializer,
@@ -60,8 +58,9 @@ from exchange.api.serializers import (
     UpdateRecyclablesDealSerializer,
     UpdateEquipmentDealSerializer,
     MatchingApplicationSerializer,
-    UpdateRecyclablesApplicationSerializer, RecyclablesDealsForOffers, ApplicationOffersSerializer,
-    SpecialApplicationsSerializer, SpecialSerializer,
+    UpdateRecyclablesApplicationSerializer, RecyclablesDealsForOffers,
+    SpecialApplicationsSerializer, SpecialSerializer, AllRecyclablesApplicationsSerializer,
+    ContractsStatisticsMarkSerializer, SupplyContractsPricesForMedianPriceSerializer,
 )
 from exchange.models import (
     RecyclablesApplication,
@@ -71,6 +70,7 @@ from exchange.models import (
     Review,
     EquipmentApplication,
     EquipmentDeal, DealType, UrgencyType, SpecialApps, SpecialApplication, SpecialApplicationPaidPeriod,
+    ContractsStatisticsMark,
 )
 from exchange.services import filter_qs_by_coordinates
 from exchange.utils import (
@@ -80,9 +80,13 @@ from exchange.utils import (
 )
 from exchange.signals import (
     recyclables_deal_status_changed,
-    equipment_deal_status_changed,
+    equipment_deal_status_changed, create_ready_for_shipment_contract,
+    update_ready_for_shipment_contract, delete_ready_for_shipment_contract, delete_supply_contract,
+    delete_equipment_application, create_equipment_application, update_equipment_application, create_application_deal,
+    update_application_deal, update_equipment_deal, create_equipment_deal, create_supply_contract_by_form,
+    update_supply_contract_by_form
 )
-from product.models import Recyclables, Equipment, EquipmentCategory
+from product.models import Recyclables, Equipment, EquipmentCategory, RecyclablesCategory
 from statistic.api.serializers import RecyclablesAppStatisticsSerializer
 from user.models import UserRole
 
@@ -155,6 +159,7 @@ class RecyclablesApplicationFilterSet(FilterSet):
     class Meta:
         model = RecyclablesApplication
         fields = {
+            "company__activity_types__rec_col_types": ["exact"],
             "deal_type": ["exact"],
             "urgency_type": ["exact"],
             "recyclables": ["exact"],
@@ -164,7 +169,83 @@ class RecyclablesApplicationFilterSet(FilterSet):
             "created_at": ["gte", "lte"],
             "price": ["gte", "lte"],
             "application_recyclable_status": ["exact"],
+            "city__region": ["exact"],
+            "city__region__district": ["exact"],
+            "with_nds": ["exact"],
+            "bale_weight": ["gte", "lte"],
+
+            "status": ["exact"],
+            "is_deleted": ["exact"],
         }
+
+
+class ContractsStatisticsMarkViewSet(viewsets.ModelViewSet):
+    queryset = ContractsStatisticsMark.objects.prefetch_related("company", "application", "application_recyclables")
+    default_serializer_class = ContractsStatisticsMarkSerializer
+
+
+class AllRecyclablesApplicationsViewSet(
+    ImagesMixin,
+    MultiSerializerMixin,
+    FavoritableMixin,
+    ExcludeMixin,
+    viewsets.ModelViewSet
+):
+    queryset = RecyclablesApplication.objects.prefetch_related("company", "recyclables", "company__city",
+                                                               "recyclables__category", "company__activity_types",
+                                                               "company__activity_types__rec_col_types").annotate_total_weight()
+    yasg_parser_classes = [CamelCaseFormParser, CamelCaseMultiPartParser]
+    parent_lookup_kwargs = "company_pk"
+    search_fields = ("company__name", "company__inn", "recyclables__name")
+    ordering_fields = "__all__"
+    filter_backends = (
+        filters.SearchFilter,
+        filters.OrderingFilter,
+        DjangoFilterBackend,
+        FavoriteFilterBackend,
+    )
+    filterset_class = RecyclablesApplicationFilterSet
+    serializer_classes = {
+        "list": AllRecyclablesApplicationsSerializer
+    }
+
+    # pagination_class = None
+
+    def list(self, request, *args, **kwargs):
+        period = validate_period(request.query_params.get("period", "all"))
+
+        get_truncation_class(period)
+        lower_date_bound = get_lower_date_bound(period)
+        queryset = self.filter_queryset(self.get_queryset()).filter(~Q(company__is_deleted=1), ~Q(is_deleted=1))
+        if lower_date_bound:
+            queryset = queryset.filter(Q(status__lte=ApplicationStatus.CLOSED),
+                                       urgency_type=UrgencyType.SUPPLY_CONTRACT,
+                                       created_at__gte=lower_date_bound)
+        else:
+            queryset = queryset.filter(Q(status__lte=ApplicationStatus.CLOSED),
+                                       urgency_type=UrgencyType.SUPPLY_CONTRACT)
+
+        if request.query_params.get('category'):
+            queryset = queryset.filter(
+                recyclables__category__id=request.query_params.get('category'))
+
+        if request.query_params.get('sub_category'):
+            queryset = queryset.filter(
+                recyclables__id=request.query_params.get('sub_category'))
+
+        # ОПРЕДЕЛЯЕТ ПОСТАВЩИКА, ПЕРЕРАБОТЧИКА, ПОКУПАТЕЛЯ
+        if (request.query_params.get('company_activity_types')):
+            company_activity_types = int(request.query_params.get('company_activity_types'))
+            queryset = queryset.filter(company__activity_types__rec_col_types__activity=company_activity_types)
+
+        if not request.query_params.get('page'):
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
 
 
 class RecyclablesApplicationViewSet(
@@ -175,9 +256,11 @@ class RecyclablesApplicationViewSet(
     viewsets.ModelViewSet,
     RecyclableApplicationsQuerySetMixin
 ):
-    queryset = RecyclablesApplication.objects.select_related(
-        "company", "recyclables"
-    ).annotate_total_weight()
+    # queryset = RecyclablesApplication.objects.select_related("company", "recyclables").annotate_total_weight()
+    queryset = RecyclablesApplication.objects.prefetch_related("company", "recyclables", "images").prefetch_related(
+        "company__city", "company__activity_types", "company__activity_types__advantages",
+        "company__activity_types__rec_col_types", "company__city__region",
+        "company__city__region__district").annotate_total_weight()
     serializer_classes = {
         "list": RecyclablesApplicationSerializer,
         "retrieve": RecyclablesApplicationSerializer,
@@ -207,22 +290,6 @@ class RecyclablesApplicationViewSet(
                                                             ApplicationStatus.DECLINED)).filter(
                 is_deleted=0) if self.action != "profile_applications" else super().get_queryset()
 
-        # Фильтр по активности компаний
-        # if self.request.query_params.get('company_activity_type'):
-        #    activityType = self.request.query_params.get('company_activity_type')
-        #    activity = CompanyActivityType.objects.all().filter(Q(activity=activityType))
-        # Фильтр для цены (заявки)
-        if self.request.query_params.get('price__gte') or (
-                self.request.query_params.get('price__gte') and self.request.query_params.get('price__lte')):
-            if self.request.query_params.get('price__gte'):
-                price_gte = self.request.query_params.get('price__gte')
-                qs = qs.filter(Q(price__gte=price_gte))
-
-            if self.request.query_params.get('price__gte') and self.request.query_params.get('price__lte'):
-                price_gte = self.request.query_params.get('price__gte')
-                price_lte = self.request.query_params.get('price__lte')
-                qs = qs.filter(Q(price__gte=price_gte, price__lte=price_lte))
-
         # Фильтр для общего веса (заявки)
         if self.request.query_params.get('total_weight__gte') or (
                 self.request.query_params.get('total_weight__gte') and self.request.query_params.get(
@@ -237,240 +304,102 @@ class RecyclablesApplicationViewSet(
                 total_weight_lte = self.request.query_params.get('total_weight__lte')
                 qs = qs.filter(Q(total_weight__gte=total_weight_gte, total_weight__lte=total_weight_lte))
 
-        # Фильтр для сорности (заявки)
-        if self.request.query_params.get('moisture__gte') or (
-                self.request.query_params.get('moisture__gte') and self.request.query_params.get(
-            'moisture__lte')):
-            if self.request.query_params.get('moisture__gte'):
-                moisture_gte = self.request.query_params.get('moisture__gte')
-                qs = qs.filter(Q(moisture__gte=moisture_gte))
-
-            if self.request.query_params.get('moisture__gte') and self.request.query_params.get(
-                    'moisture__lte'):
-                moisture_gte = self.request.query_params.get('moisture__gte')
-                moisture_lte = self.request.query_params.get('moisture__lte')
-                qs = qs.filter(Q(moisture__gte=moisture_gte, moisture__lte=moisture_lte))
-
-        # Фильтр для влажности (заявки)
-        if self.request.query_params.get('weediness__gte') or (
-                self.request.query_params.get('weediness__gte') and self.request.query_params.get(
-            'weediness__lte')):
-            if self.request.query_params.get('weediness__gte'):
-                weediness_gte = self.request.query_params.get('weediness__gte')
-                qs = qs.filter(Q(weediness__gte=weediness_gte))
-            if self.request.query_params.get('weediness__gte') and self.request.query_params.get(
-                    'weediness__lte'):
-                weediness_gte = self.request.query_params.get('weediness__gte')
-                weediness_lte = self.request.query_params.get('weediness__lte')
-                qs = qs.filter(Q(weediness__gte=weediness_gte, weediness__lte=weediness_lte))
-
-        # Фильтр для кол во кип (заявки)
-        if self.request.query_params.get('bale_weight__gte') or (
-                self.request.query_params.get('bale_weight__gte') and self.request.query_params.get(
-            'bale_weight__lte')):
-            if self.request.query_params.get('bale_weight__gte'):
-                bale_weight_gte = self.request.query_params.get('bale_weight__gte')
-                qs = qs.filter(Q(bale_weight__gte=bale_weight_gte))
-            if self.request.query_params.get('bale_weight__gte') and self.request.query_params.get(
-                    'bale_weight__lte'):
-                bale_weight_gte = self.request.query_params.get('bale_weight__gte')
-                bale_weight_lte = self.request.query_params.get('bale_weight__gte')
-                qs = qs.filter(Q(bale_weight__gte=bale_weight_gte, bale_weight__lte=bale_weight_lte))
-
-        # Фильтры для компаний
-
-        # Фильтр кол-во сделок (пока оставил на стороне фронтенда)
-        # if self.request.query_params.get('company_deals_number'):
-        #    company_deals_number = self.request.query_params.get('company_deals_number')
-
         # Фильтр по доверию к компании (надёжная/ненадёжная) (общий)
         if self.request.query_params.get('companies_trust'):
             companies_trust = int(self.request.query_params.get('companies_trust'))
             qs = qs.filter(Q(company__status=companies_trust))
+        return self.split_query_params(qs, self.request.query_params, self.kwargs)  # .distinct()
 
-        # Фильтр отменены/не отменены сделки (компании)
-        if self.request.query_params.get('company_failed_deals'):
-            company_failed_deals = int(self.request.query_params.get('company_failed_deals'))
-            if company_failed_deals == 2:
-                apps_ids = RecyclablesDeal.objects.filter(Q(status=DealStatus.PROBLEM)).values_list("application",
-                                                                                                    flat=True)
-                qs = qs.filter(id__in=apps_ids)
-            if company_failed_deals == 1:
-                apps_ids = RecyclablesDeal.objects.filter(~Q(status=DealStatus.PROBLEM)).values_list("application",
-                                                                                                     flat=True)
-                qs = qs.filter(id__in=apps_ids)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
 
-        # Фильтр по объёму сделок (компании)
-        if self.request.query_params.get('company_volume'):
+        urgency_type = int(request.data.get('urgency_type'))
+        application = RecyclablesApplication.objects.get(id=int(serializer.data["id"]))
+        if urgency_type == 2:
+            company = int(request.data.get('company'))
+            current_company = Company.objects.get(id=company)
+            price = request.data.get('price')
+            new_statistics = ContractsStatisticsMark.objects.create(
+                company_id=current_company.id,
+                company_name=current_company.name,
+                recyclable_id=application.recyclables.id,
+                recyclable_name=application.recyclables.name,
+                recyclable_category_id=application.recyclables.category.id,
+                recyclable_category_name=application.recyclables.category.name,
+                recyclable_application_id=application.id,
+                deal_type=application.deal_type,
+                price=price
+            )
+            new_statistics.save()
+            create_supply_contract_by_form.send_robust(sender=RecyclablesApplication,
+                                                       instance=application,
+                                                       user=request.user,
+                                                       kwargs=request.data
+                                                       )
+        if urgency_type == 1:
+            create_ready_for_shipment_contract.send_robust(sender=RecyclablesApplication,
+                                                           instance=application,
+                                                           user=request.user,
+                                                           kwargs=request.data
+                                                           )
 
-            company_volume = int(self.request.query_params.get('company_volume'))
-
-            deals = RecyclablesDeal.objects.all()
-
-            companies_ids = deals.values_list("application__company", flat=True)
-
-            current_apps_ids = []
-            for i in companies_ids:
-                deals_sum = 0
-                lst = []
-                for j in deals:
-                    if i == j.application.company.id:
-                        deals_sum += j.weight
-                        lst.append(j.application.id)
-                if deals_sum >= company_volume:
-                    current_apps_ids.extend(lst)
-
-            qs = qs.filter(id__in=current_apps_ids)
-
-        # Фильтр по минимальному кол-во сделок (компании)
-        if self.request.query_params.get('company_deals_number'):
-
-            company_deals_number = int(self.request.query_params.get('company_deals_number'))
-
-            deals = RecyclablesDeal.objects.all()
-
-            companies_ids = deals.values_list("application__company", flat=True)
-
-            current_apps_ids = []
-            for i in companies_ids:
-                deals_num = 0
-                lst = []
-                for j in deals:
-                    if i == j.application.company.id:
-                        deals_num += 1
-                        lst.append(j.application.id)
-                if deals_num >= company_deals_number:
-                    current_apps_ids.extend(lst)
-
-            qs = qs.filter(id__in=current_apps_ids)
-
-        # Фильтр по наличию контрактов на поставку (компании)
-        if self.request.query_params.get('company_has_supply_contract'):
-            qs = qs.filter(Q(urgency_type=UrgencyType.SUPPLY_CONTRACT))
-
-        # Фильтр по ИП/Юр (компании)
-        if self.request.query_params.get('is_jur_or_ip'):
-
-            is_jur_or_ip = int(self.request.query_params.get('is_jur_or_ip'))
-
-            if is_jur_or_ip == 1:
-                qs = qs.filter(company__name__icontains="ООО")
-
-            if is_jur_or_ip == 2:
-                qs = qs.filter(company__name__icontains="ИП")
-
-        # Фильтр по типу компании (общий)
-        if self.request.query_params.get('activity_types__rec_col_types'):
-            activity_types__rec_col_types = int(self.request.query_params.get('activity_types__rec_col_types'))
-            recyclable_id = self.request.query_params.get('recyclables')
-            companies_ids = CompanyActivityType.objects.filter(
-                rec_col_types__id=activity_types__rec_col_types).values_list("company",
-                                                                             flat=True)
-            qs = qs.filter(company__id__in=companies_ids, recyclables=recyclable_id)
-
-        # Фильтр по наличию у главы компании нескольких компаний на площадке
-        if self.request.query_params.get('owner_has_companies'):
-            owner_has_companies = int(self.request.query_params.get('owner_has_companies'))
-
-            companies_ids = qs.values_list("company", flat=True)
-            current_companies_owners = []
-            repeated = []
-            single = []
-            companies = Company.objects.filter(id__in=companies_ids)
-
-            for i in companies:
-                current_companies_owners.append(i.head_full_name if len(i.head_full_name) > 0 else '')
-
-            if owner_has_companies == 2:
-                for i in current_companies_owners:
-                    for j in companies:
-                        if i == j.head_full_name:
-                            repeated.append(j.id)
-                # Модуль Counter будет оставлять только дублирующиеся id компаний
-                counts = Counter(repeated)
-                result = [num for num in repeated if counts[num] > 1]
-
-                qs = qs.filter(company__id__in=result)
-
-            if owner_has_companies == 1:
-                for i in current_companies_owners:
-                    for j in companies:
-                        if i == j.head_full_name:
-                            single.append(j.id)
-                # Модуль Counter будет оставлять только дублирующиеся id компаний
-                counts = Counter(single)
-                result = [num for num in single if counts[num] == 1]
-
-                qs = qs.filter(company__id__in=result)
-
-        # Фильтр по налогообложению (общий)
-        if self.request.query_params.get('nds'):
-            nds = int(self.request.query_params.get('nds'))
-            if nds == 1:
-                qs = qs.filter(Q(with_nds=0))
-            if nds == 2:
-                qs = qs.filter(Q(with_nds=1))
-        if self.action == "retrieve":
-            qs = super().get_queryset()
-        return self.split_query_params(qs, self.request.query_params, self.kwargs)
-
-    # company = self.request.query_params.get('company')
-
-    # urgency_type = self.request.query_params.get('urgency_type')
-    #
-    # recyclables = self.request.query_params.get('recyclables')
-    #
-    # search = self.request.query_params.get('search')
-    #
-    # filter_by_urgency_type = qs.filter(urgency_type=urgency_type, recyclables=recyclables)
-    #
-    # raw_coordinates = self.request.query_params.getlist("point", [])
-    #
-    # recyclable_id = self.request.query_params.get('recyclable_id')
-    # company_id = self.request.query_params.get('company_id')
-    #
-    # if search:
-    #    return qs
-    #
-    # elif recyclable_id and company_id:
-    #    qs = qs.filter(~Q(company_id=company_id)).filter(Q(recyclables_id=recyclable_id)).filter(
-    #        ~Q(deal_type=DealType.SELL))
-    #    return qs
-    #
-    # elif self.kwargs.get('pk') or search == '':
-    #    return qs
-    #
-    # elif company:
-    #    qs = qs.filter(company_id=company)
-    #    return qs
-    #
-    # elif not raw_coordinates and filter_by_urgency_type:
-    #    qs = filter_by_urgency_type
-    #    return qs
-    #
-    # elif raw_coordinates:
-    #    if urgency_type:
-    #        qs = filter_qs_by_coordinates(qs, filter_by_urgency_type)
-    #        return qs
-    #    else:
-    #        qs = filter_qs_by_coordinates(qs, raw_coordinates)
-    #        return qs
-    # else:
-    #    return qs
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def update(self, request, *args, **kwargs):
+        urgency_type = request.data.get('urgency_type')
+        application = self.get_object()
+        if urgency_type == 2:
+            company = request.data.get('company')
+            current_company = Company.objects.get(id=company)
+            price = request.data.get('price')
+            old_price = RecyclablesApplication.objects.get(id=kwargs['pk']).price
+
+            if old_price != price and not request.data.get('is_deleted'):
+                new_statistics = ContractsStatisticsMark.objects.create(
+                    company_id=current_company.id,
+                    company_name=current_company.name,
+                    recyclable_id=application.recyclables.id,
+                    recyclable_name=application.recyclables.name,
+                    recyclable_category_id=application.recyclables.category.id,
+                    recyclable_category_name=application.recyclables.category.name,
+                    recyclable_application_id=application.id,
+                    deal_type=application.deal_type,
+                    price=price
+                )
+                new_statistics.save()
+            lst = equals_application_and_request(application, **request.data)
+            update_supply_contract_by_form.send_robust(sender=RecyclablesApplication,
+                                                       instance=application,
+                                                       user=request.user,
+                                                       kwargs=lst
+                                                       )
+        if urgency_type == 1:
+            lst = equals_application_and_request(application, **request.data)
+            update_ready_for_shipment_contract.send_robust(sender=RecyclablesApplication,
+                                                           instance=application,
+                                                           user=request.user,
+                                                           kwargs=lst
+                                                           )
+
         if len(request.data) == 1 and request.data['status'] == 3:
             item = RecyclablesApplication.objects.get(id=kwargs['pk'])
-            item.status = 3
+            item.status = ApplicationStatus.DELETE_PERMANENTLY
             item.save()
             return Response(status=status.HTTP_200_OK)
         else:
             partial = kwargs.pop('partial', False)
             instance = self.get_object()
-
+            # Когда из карточки удаляется фракция
+            if request.data.get('is_deleted'):
+                instance.is_deleted = True
+                instance.status = request.data.get('status')
+                instance.save()
+            # _________________________________________________
             serializer = self.get_serializer(instance, data=request.data, partial=partial)
             serializer.is_valid(raise_exception=True)
-
             self.perform_update(serializer)
 
             if getattr(instance, '_prefetched_objects_cache', None):
@@ -479,6 +408,21 @@ class RecyclablesApplicationViewSet(
                 instance._prefetched_objects_cache = {}
 
             return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.urgency_type == 1:
+            delete_ready_for_shipment_contract.send_robust(sender=RecyclablesApplication,
+                                                           instance=instance,
+                                                           user=request.user,
+                                                           )
+        if instance.urgency_type == 2:
+            delete_supply_contract.send_robust(sender=RecyclablesApplication,
+                                               instance=instance,
+                                               user=request.user,
+                                               )
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -502,18 +446,49 @@ class RecyclablesApplicationViewSet(
         lower_date_bound = get_lower_date_bound(period)
         pages = request.query_params.get('page')
         queryset = self.filter_queryset(self.get_queryset())
+        urgency_type = request.query_params.get('urgency_type')
+
+        no_page = request.query_params.get('no_page')
+        is_favorite = request.query_params.get('is_favorite')
+
+        if is_favorite == "true":
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            serializer = self.get_serializer(queryset, many=True)
+
+            return Response(serializer.data)
+
+        # ЭТОТ IF ДЛЯ КАРТОЧКИ НА ФРОНТЕНДЕ ГДЕ ПОКАЗЫВАЮТСЯ ОБЪЯВЛЕНИЯ ПО ПРОДАЖАМ/ПОКУПКАМ /exchange/3?type=2
+        if no_page == 'true':
+            queryset = queryset.filter(Q(status__lte=ApplicationStatus.CLOSED),
+                                       Q(urgency_type=urgency_type))
+
+            serializer = self.get_serializer(queryset, many=True)
+            data = {
+                "results": serializer.data,
+                "count": len(serializer.data)
+            }
+            return Response(data)
+
         if lower_date_bound:
-            queryset = queryset.filter(created_at__gte=lower_date_bound)
-        # Есть сомнения по этому if
-        if not pages:
-            if lower_date_bound:
-                queryset = super().get_queryset().filter(Q(status__lte=ApplicationStatus.CLOSED),
-                                                         urgency_type=UrgencyType.SUPPLY_CONTRACT,
-                                                         created_at__gte=lower_date_bound)
-            else:
-                queryset = super().get_queryset().filter(Q(status__lte=ApplicationStatus.CLOSED),
-                                                         urgency_type=UrgencyType.SUPPLY_CONTRACT)
-            # queryset_apps_closed_and_deleted = super().get_queryset().filter(~Q(status=ApplicationStatus.CLOSED)).filter(~Q(status=ApplicationStatus.DECLINED)).filter(is_deleted=0)
+            queryset = queryset.filter(Q(status__lte=ApplicationStatus.CLOSED),
+                                       urgency_type=urgency_type if urgency_type else UrgencyType.SUPPLY_CONTRACT,
+                                       created_at__gte=lower_date_bound)
+        else:
+            queryset = queryset.filter(Q(status__lte=ApplicationStatus.CLOSED),
+                                       Q(urgency_type=urgency_type if urgency_type else UrgencyType.SUPPLY_CONTRACT))
+
+        if request.query_params.get('category'):
+            queryset = queryset.filter(
+                recyclables__category__id=request.query_params.get('category'))
+
+        if request.query_params.get('sub_category'):
+            queryset = queryset.filter(
+                recyclables__id=request.query_params.get('sub_category'))
+
+        if not pages and not urgency_type:
             serializer = self.get_serializer(queryset, many=True)
             return Response(serializer.data)
 
@@ -525,51 +500,41 @@ class RecyclablesApplicationViewSet(
 
         return Response(serializer.data)
 
-    # def list(self, request, *args, **kwargs):
-    #    print('fdssssssssssssssssssssfdfsdfsdffsdf')
-    #    #recyclables = self.filter_queryset(self.get_queryset())
-    #    #period = validate_period(request.query_params.get("period", "all"))
-    #    #serializer_context = self.get_serializer_context()
-    #    #serializer_context["lower_date_bound"] = get_lower_date_bound(period)
-    #    """
-    #    Принимает список query необязательных параметров point.
-    #    ?point=55.781361,49.183067&point=55.781361,49.183067&point=55.781361,49.183067
-    #    При использовании, необходимо передать как минимум три точки.
-    #    Отбирает заявки, территориально находящиеся в указанном многоугольнике
-    #    """
-    #    return super().list(request, *args, **kwargs)
+    @action(methods=["GET"], detail=False)
+    def ready_for_shipment(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset()).filter(urgency_type=UrgencyType.READY_FOR_SHIPMENT)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(methods=["GET"], detail=False)
+    def supply_contracts_recyclable_prices_for_median_price(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset()).filter(urgency_type=UrgencyType.SUPPLY_CONTRACT)
+        serializer = SupplyContractsPricesForMedianPriceSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(methods=["GET"], detail=False)
     def company_apps(self, request, *args, **kwargs):
         company_id = request.query_params.get('company')
-        data = self.list(request, *args, **kwargs)
-        apps = RecyclablesApplication.objects.filter(company_id=company_id)
+        apps = RecyclablesApplication.objects.filter(company__id=company_id)
         for i in apps:
             i.total_weight = i.full_weigth
         app_serializer = RecyclablesApplicationSerializer(apps, many=True)
-
-        data.data['results'] = app_serializer.data
-        return data
+        return Response(app_serializer.data, status=status.HTTP_200_OK)
 
     @action(methods=["GET"], detail=False)
     def profile_applications(self, request, *args, **kwargs):
-        company_id = request.query_params.get('company')
+        company_id = request.data.get('company')
         urgency_type = request.query_params.get('urgency_type')
         apps = RecyclablesApplication.objects.filter(company_id=company_id, urgency_type=urgency_type)
 
         queryset = self.filter_queryset(apps)
-        page = self.paginate_queryset(queryset)
-
-        # ata = self.list(request, *args, **kwargs)
-
-        for i in page:  # apps:
-            i.total_weight = i.full_weigth
-
-        # app_serializer = RecyclablesApplicationSerializer(apps, many=True)
-        # app_serializer = RecyclablesApplicationSerializer(page, many=True)
-        serializer = self.get_serializer(page, many=True)
-        # data.data['results'] = serializer.data  # app_serializer.data
-        return self.get_paginated_response(serializer.data)  # data
+        if len(queryset) > 0:
+            page = self.paginate_queryset(queryset)
+            for i in page:  # apps:(
+                i.total_weight = i.full_weigth
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @swagger_auto_schema(
         methods=["POST"], request_body=MatchingApplicationSerializer
@@ -581,17 +546,6 @@ class RecyclablesApplicationViewSet(
         deal = serializer.save()
 
         return Response(RecyclablesDealSerializer(deal).data)
-
-    # УДАЛИТЬ
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
-
-    # __________________________________________________________
 
     @action(methods=["GET"], detail=False)
     def offer(self, request, *args, **kwargs):
@@ -644,6 +598,9 @@ class EquipmentApplicationFilterSet(FilterSet):
             "price": ["gte", "lte"],
             "count": ["gte", "lte"],
             "manufacture_date": ["gte", "lte"],
+
+            "status": ["exact"],
+            "is_deleted": ["exact"]
         }
 
 
@@ -713,20 +670,11 @@ class EquipmentApplicationViewSet(
             if nds == 2:
                 qs = qs.filter(Q(with_nds=1))
 
-        return qs
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.filter_queryset(self.get_queryset())
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+        return qs.distinct()  # .order_by("-created_at")
 
     @action(methods=["GET"], detail=False)
     def profile_applications(self, request, *args, **kwargs):
+
         company_id = request.query_params.get('company')
         apps = EquipmentApplication.objects.filter(company_id=company_id)
 
@@ -745,27 +693,63 @@ class EquipmentApplicationViewSet(
     # ______________________________________________________
 
     def create(self, request, *args, **kwargs):
-        equipment_name = request.data['equipment']
-        equipment_description = request.data['description']
-        equipment_category = EquipmentCategory.objects.get(id=request.data['category'])
-        equip = Equipment.objects.create(name=equipment_name, category=equipment_category,
-                                         description=equipment_description if len(equipment_description) > 0 else None)
-        equip.save()
-        data = request.data
-        data['equipment'] = equip.id
-        data['category'] = equipment_category.id
-        serializer = self.get_serializer(data=data)
+        # equipment_name = request.data['equipment']
+        # equipment_description = request.data['description']
+        # equipment_category = EquipmentCategory.objects.get(id=request.data['category'])
+        # equip = Equipment.objects.create(name=equipment_name, category=equipment_category,
+        #                                  description=equipment_description if len(equipment_description) > 0 else "")#0 else None)
+        # equip.save()
+
+        # data = request.data
+        # data['equipment'] = equip.id
+        # data['category'] = equipment_category.id
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
+        equipApp = EquipmentApplication.objects.get(id=int(serializer.data["id"]))
+        create_equipment_application.send_robust(sender=EquipmentApplication,
+                                                 instance=equipApp,
+                                                 user=request.user,
+                                                 kwargs=request.data
+                                                 )
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        lst = equals_application_and_request(instance, **request.data)
+        update_equipment_application.send_robust(sender=EquipmentApplication,
+                                                 instance=instance,
+                                                 user=request.user,
+                                                 kwargs=lst)
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+
+        if getattr(instance, '_prefetched_objects_cache', None):
+            # If 'prefetch_related' has been applied to a queryset, we need to
+            # forcibly invalidate the prefetch cache on the instance.
+            instance._prefetched_objects_cache = {}
+
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        delete_equipment_application.send_robust(sender=RecyclablesApplication,
+                                                 instance=instance,
+                                                 user=request.user, )
+
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ExchangeRecyclablesViewSet(
     generics.ListAPIView,
     viewsets.GenericViewSet,
 ):
-    queryset = Recyclables.objects.annotate_applications()
+    queryset = Recyclables.objects.prefetch_related("applications").annotate_applications()
     serializer_class = RecyclablesAppStatisticsSerializer  # ExchangeRecyclablesSerializer
     filter_backends = (
         filters.SearchFilter,
@@ -777,7 +761,7 @@ class ExchangeRecyclablesViewSet(
         "category__name",
     )
     search_fields = ("name",)
-    filterset_fields = ("category",)
+    filterset_fields = ("category", "applications__city__region__district", "applications__city__region")
 
     def get_queryset(self):
 
@@ -826,22 +810,27 @@ class ExchangeRecyclablesViewSet(
             ),
         ],
     )
+    @action(methods=["GET"], detail=False)
+    def recyclables_by_category_without_pages(self, request, *args, **kwargs):
+        query = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(query, many=True)
+        return Response(serializer.data)
+
     @action(methods=["GET"], detail=True)
     def graph(self, request, pk):
+        urgency_type = int(request.query_params.get("urgency_type"))
+        deal_type = int(request.query_params.get("deal_type"))
         period = request.query_params.get("period", "all")
         period = validate_period(period)
-
         recyclable: Recyclables = self.get_object()
-
         TruncClass = get_truncation_class(period)
         lower_date_bound = get_lower_date_bound(period)
-
-        deals = self.get_filtered_deals(
-            TruncClass, lower_date_bound, recyclable
-        )
-
-        graph_data = deals.values_list("price", "truncated_date")
-
+        # deals = self.get_filtered_deals(
+        #     TruncClass, lower_date_bound, recyclable
+        # )
+        applications = self.get_filtered_applications(TruncClass, lower_date_bound, recyclable, urgency_type, deal_type)
+        # graph_data = deals.values_list("price", "truncated_date")
+        graph_data = applications.values_list("price", "truncated_date")
         return Response(graph_data)
 
     @staticmethod
@@ -859,6 +848,24 @@ class ExchangeRecyclablesViewSet(
             .distinct("truncated_date")
         )
         return deals
+
+    @staticmethod
+    def get_filtered_applications(TruncClass, lower_date_bound, recyclable, urgency_type, deal_type):
+        applications_filter = {
+            "recyclables": recyclable,
+            "status": ApplicationStatus.PUBLISHED,
+            "urgency_type": urgency_type,
+            "deal_type": deal_type,
+            "is_deleted": False,
+        }
+        if lower_date_bound:
+            applications_filter["created_at__gte"] = lower_date_bound
+        filtered_apps = RecyclablesApplication.objects.filter(**applications_filter)
+        apps = (
+            filtered_apps.annotate(truncated_date=TruncClass("created_at"))
+            .order_by("truncated_date", "-created_at"))
+
+        return apps
 
 
 class RecyclablesDealFilterSet(FilterSet):
@@ -892,6 +899,8 @@ class RecyclablesDealFilterSet(FilterSet):
             "created_at": ["gte", "lte"],
             "price": ["gte", "lte"],
             "weight": ["gte", "lte"],
+            "status": ["exact"],
+            "created_by": ["exact"],
         }
 
 
@@ -929,11 +938,40 @@ class RecyclablesDealViewSet(
     )
     filterset_class = RecyclablesDealFilterSet
 
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        deal = RecyclablesDeal.objects.get(id=int(serializer.data["id"]))
+        create_application_deal.send_robust(sender=RecyclablesDeal,
+                                            instance=deal,
+                                            user=request.user,
+                                            kwargs=request.data
+                                            )
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     def update(self, request, *args, **kwargs):
         """
         Overriding in order to send signal when changing deal status
         """
         instance: RecyclablesDeal = self.get_object()
+        lst = equals_deal_and_request(instance, **request.data)
+        update_application_deal.send_robust(sender=RecyclablesDeal,
+                                            instance=instance,
+                                            user=request.user,
+                                            kwargs=lst)
         old_status = instance.status
         serializer = self.get_serializer(instance, data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1137,12 +1175,30 @@ class EquipmentDealViewSet(
     )
     filterset_class = EquipmentDealFilterSet
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        deal = EquipmentDeal.objects.get(id=int(serializer.data["id"]))
+        create_equipment_deal.send_robust(sender=EquipmentDeal,
+                                          instance=deal,
+                                          user=request.user,
+                                          kwargs=request.data
+                                          )
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     def update(self, request, *args, **kwargs):
         """
         Overriding in order to send signal when changing deal status
         """
 
         instance: EquipmentDeal = self.get_object()
+        lst = equals_deal_and_request(instance, **request.data)
+        update_equipment_deal.send_robust(sender=EquipmentDeal,
+                                          instance=instance,
+                                          user=request.user,
+                                          kwargs=lst)
         old_status = instance.status
         serializer = self.get_serializer(instance, data=request.data)
         serializer.is_valid(raise_exception=True)

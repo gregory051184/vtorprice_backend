@@ -19,11 +19,17 @@ class BaseModel(models.Model):
     )
     created_at = models.DateTimeField("Дата добавления", auto_now_add=True)
 
+    # changed_at = models.DateTimeField(auto_now=True)
+
     # Переопределяем менежер objects
     objects = BulkUpdateOrCreateQuerySet.as_manager()
 
     class Meta:
         abstract = True
+
+
+
+
 
 
 class BaseNameModel(BaseModel):

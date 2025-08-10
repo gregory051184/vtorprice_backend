@@ -84,5 +84,7 @@ router.register(
 
 router.register(r"regions", views.RegionViewSet, basename="regions")
 
+router.register(r"districts", views.DistrictViewSet, basename="districts")
+
 urlpatterns = router.urls
 urlpatterns += companies_router.urls

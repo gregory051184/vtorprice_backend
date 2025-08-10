@@ -1,9 +1,9 @@
 import json
 import os
 from django.db.models import Q
-from django.contrib.auth import get_user_model, logout
+from django.contrib.auth import get_user_model, logout, user_logged_in
+from django.contrib.sessions.models import Session
 from django.core.mail import send_mail
-from django.http import QueryDict, JsonResponse
 from django_filters import FilterSet
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status, viewsets
@@ -18,8 +18,6 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from requests import post
-
-from common.password_generator import generate_password
 from company.models import Company
 from user.api.serializers import (
     CreateUserSerializer,
@@ -27,9 +25,9 @@ from user.api.serializers import (
     PhoneConfirmSerializer,
     UserObtainTokenSerializer,
     UpdateUserSerializer,
-    UpdateUserRoleSerializer,
+    UpdateUserRoleSerializer, UserActionsSerializer,
 )
-from user.models import UserRole
+from user.models import UserRole, UserActions
 from user.services.sms_ru import make_phone_call
 
 User = get_user_model()
@@ -78,10 +76,26 @@ class AuthViewSet(CreateModelMixin, viewsets.GenericViewSet):
     def company_staff(self, request, *args, **kwargs):
         company_id = request.query_params['id']
         current_company = Company.objects.get(id=company_id)
-        staff = User.objects.filter(~Q(id=current_company.owner.id), company_id=current_company.id)
-        serializer = self.get_serializer(staff, many=True)
-        #serializer.is_valid(raise_exception=True)
-        #return Response(JsonResponse(list(staff.values()), safe=False), status=status.HTTP_200_OK)
+        if current_company.owner:
+            staff = User.objects.filter(~Q(id=current_company.owner.id), company_id=current_company.id)
+
+            serializer = self.get_serializer(staff, many=True)
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        if current_company.id:
+            staff = User.objects.filter(company_id=current_company.id)
+
+            serializer = self.get_serializer(staff, many=True)
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # ИСПОЛЬЗУЕТСЯ ДЛЯ ПОЛУЧЕНИЯ СПИСКА МЕНЕДЖЕРОВ ДЛЯ ИХ НАЗНАЧЕНИЯ В КОМПАНИИ
+    @action(methods=["GET"], detail=False)
+    def managers(self, request, *args, **kwargs):
+        filter_query = self.filter_queryset(self.get_queryset()).filter(role=UserRole.MANAGER)
+        serializer = self.get_serializer(filter_query, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @swagger_auto_schema(
@@ -101,12 +115,16 @@ class AuthViewSet(CreateModelMixin, viewsets.GenericViewSet):
 
         try:
             user = User.objects.get(phone=data.get("phone"))
+            # user_logged_in.send_robust(sender=User, user=user)
+            # for ses in Session.objects.all():
+            #     data = ses.get_decoded()
+            #     user_owner = User.objects.filter(pk=data.get('_auth_user_id', None))
+            #     print(f'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV - {user_owner}')
         except User.DoesNotExist:
             serializer = self.get_serializer(data=data)
             serializer.is_valid(raise_exception=True)
             user = serializer.save()
             is_created = True
-
         try:
             if user.is_staff:
                 user.code = 8811
@@ -304,6 +322,7 @@ class UserView(CreateModelMixin, UpdateModelMixin, APIView):
     permission_classes = (IsAuthenticated,)
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
+
     def get_serializer_context(self):
         """
         Extra context provided to the serializer class.
@@ -373,6 +392,25 @@ class UserView(CreateModelMixin, UpdateModelMixin, APIView):
         logout(request)
         user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class UserActionsViewSet(viewsets.ModelViewSet):
+    queryset = UserActions.objects.prefetch_related('user', 'user__company')
+    search_fields = ('user__first_name', 'user__last_name', 'user__middle_name')
+    filterset_fields = {
+        "created_at": ["gte", "lte"],
+        "user__status": ["exact"],
+        "action_model": ["exact"],
+    }
+    serializer_class = UserActionsSerializer
+
+    @action(methods=['GET'], detail=False)
+    def managers_and_admins(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        # query = UserActions.objects.filter(user__role__lte=UserRole.MANAGER)
+        query = queryset.filter(user__role__lte=UserRole.MANAGER)
+        serializer = self.get_serializer(query, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])

@@ -20,7 +20,7 @@ from company.models import (
     City,
     Region,
     CompanyStatus,
-    Subscribe, Proposal, SubscribesLevels, SubscribesPeriod
+    Subscribe, Proposal, SubscribesLevels, SubscribesPeriod, District
 )
 from exchange.models import (
     RecyclablesApplication,
@@ -60,12 +60,12 @@ class CompanyActivityTypeInline(admin.StackedInline):
     extra = 0
 
 
-#class SubscribesLevelsInline(admin.StackedInline):
+# class SubscribesLevelsInline(admin.StackedInline):
 #    model = SubscribesLevels
 #    extra = 0
 #
 #
-#class SubscribesPeriodInline(admin.StackedInline):
+# class SubscribesPeriodInline(admin.StackedInline):
 #    model = SubscribesPeriod
 #    extra = 0
 
@@ -442,14 +442,15 @@ class RegionAdmin(BaseModelAdmin):
     pass
 
 
+@admin.register(District)
+class DistrictAdmin(BaseModelAdmin):
+    pass
+
+
 @admin.register(Subscribe)
 class SubscribeAdmin(BaseModelAdmin):
     pass
-    #inlines = (
-    #    SubscribesLevelsInline,
-    #    SubscribesPeriodInline
-    #)
-#
+
 
 @admin.register(Proposal)
 class ProposalAdmin(BaseModelAdmin):

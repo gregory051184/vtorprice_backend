@@ -39,7 +39,6 @@ geocoder_client = YandexGeocoderClient(YANDEX_GEOCODER_API_KEY)
 def yandex_geocoder(request):
     raw_address = request.query_params.get("raw_address")
     num = int(request.query_params.get("num", 10))
-
     if num > 100:
         raise ValidationError("You can't get more than 100 addresses")
 

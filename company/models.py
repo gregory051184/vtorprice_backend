@@ -22,9 +22,15 @@ from common.models import (
 )
 from common.utils import get_current_user_id
 from company.signals import verification_status_changed
+
 from user.models import UserRole, UserStatus
 
 User = get_user_model()
+
+
+class CompanyRecyclableStatus(models.IntegerChoices):
+    WASTE = 1, "Отходы"
+    GRANULE = 2, "Гранула"
 
 
 def company_storage(instance, filename):
@@ -37,7 +43,21 @@ def company_storage(instance, filename):
         return f'company_storage/{instance.id}/{uuid_filename}'
 
 
+class District(BaseNameModel):
+    class Meta:
+        verbose_name = "Округ"
+        verbose_name_plural = "Округи"
+        db_table = "districts"
+
+
 class Region(BaseNameModel):
+    district = models.ForeignKey(
+        "company.District",
+        verbose_name="Округ",
+        on_delete=models.SET_NULL,
+        related_name="regions_district",
+        null=True)
+
     class Meta:
         verbose_name = "Регион"
         verbose_name_plural = "Регионы"
@@ -62,6 +82,7 @@ class CompanyStatus(models.IntegerChoices):
     VERIFIED = 2, "Проверенная"
     RELIABLE = 3, "Надежная"
     NOT_RELIABLE = 4, "Ненадёжная"
+    FOR_DELETE = 5, "На удаление"
 
 
 class Company(AddressFieldsModelMixin, BaseNameDescModel):
@@ -107,6 +128,8 @@ class Company(AddressFieldsModelMixin, BaseNameDescModel):
         blank=True,
     )
     staff = ArrayField(models.IntegerField(), blank=True, default=list)
+
+    suspend_staff = ArrayField(models.IntegerField(), blank=True, default=list)
 
     manager = models.ForeignKey(
         User,
@@ -173,6 +196,10 @@ class CompanyRecyclablesActionType(models.IntegerChoices):
 
 
 class CompanyRecyclables(BaseModel):
+    deleted = models.BooleanField(
+        verbose_name="Удалить", default=False
+    )
+
     company = models.ForeignKey(
         "company.Company",
         verbose_name="Компания",
@@ -191,6 +218,12 @@ class CompanyRecyclables(BaseModel):
     )
     monthly_volume = models.FloatField("Примерный ежемесячный объем")
     price = AmountField("Цена")
+
+    application_recyclable_status = get_field_from_choices(
+        "Статус Фракции",
+        CompanyRecyclableStatus,
+        default=CompanyRecyclableStatus.WASTE,
+    )
 
     class Meta:
         verbose_name = "Тип вторсырья компании"
@@ -465,6 +498,16 @@ class Subscribe(BaseNameDescModel):
         'Подписки',
         SubscribesLevels,
         default=SubscribesLevels.ECONOMY
+    )
+
+    counter = models.IntegerField(
+        verbose_name="кол-во заявок",
+        default=0
+    )
+
+    staff_count = models.PositiveSmallIntegerField(
+        verbose_name="кол-во сотрудников",
+        default=0
     )
 
     period = get_field_from_choices(

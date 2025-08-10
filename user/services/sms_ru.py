@@ -32,13 +32,13 @@ def make_phone_call(phone: str, ip: str):
               "ip": -1}  # {"api_id": os.environ["SMS_RU_API_ID"], "phone": phone, "ip": -1}
 
     result = s.get(url="https://sms.ru/code/call", params=params)
-#
+
     data = result.json()
 
-    #data = {
-    #    'status': "OK",
-    #    'code': 8811
-    # }
+    # data = {
+    #     'status': "OK",
+    #     'code': 8811
+    #  }
 #
     status = data.get("status")
 

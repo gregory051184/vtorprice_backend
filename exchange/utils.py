@@ -29,7 +29,7 @@ def get_truncation_class(period: str):
     """
     if period in ("week", "month"):
         return TruncDay
-    return TruncMonth
+    return TruncDay #TruncMonth
 
 
 def get_lower_date_bound(period: str):

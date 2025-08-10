@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from common.serializers import NonNullDynamicFieldsModelSerializer
 from common.utils import MONTH_MAPPING
+from company.api.serializers import ListCompanySerializer
 from finance.models import (
     InvoicePayment,
     PaymentOrderTypes,
@@ -12,21 +13,28 @@ from finance.models import (
 )
 
 
-class InvoicePaymentSerializer(NonNullDynamicFieldsModelSerializer):
-    payment_order = serializers.SerializerMethodField()
-
-    class Meta:
-        model = InvoicePayment
-
-    def get_payment_order(self, instance: InvoicePayment):
-        return PaymentOrderSerializer(
-            instance.paymentorder_set, many=True
-        ).data
-
-
 class PaymentOrderSerializer(NonNullDynamicFieldsModelSerializer):
     class Meta:
         model = PaymentOrder
+
+
+class InvoicePaymentSerializer(NonNullDynamicFieldsModelSerializer):
+    payment_order = serializers.SerializerMethodField()
+    company = ListCompanySerializer()
+
+    # invoice_order = serializers.SerializerMethodField()
+
+    class Meta:
+        model = InvoicePayment
+    def get_payment_order(self, instance: InvoicePayment):
+        return PaymentOrderSerializer(
+                instance.paymentorder_set, many=True
+            ).data
+
+    # def get_payment_order(self, instance: InvoicePayment):
+    #     return PaymentOrderSerializer(
+    #         instance.paymentorder_set, many=True
+    #     ).data
 
 
 class CreatePaymentOrderSerializer(NonNullDynamicFieldsModelSerializer):

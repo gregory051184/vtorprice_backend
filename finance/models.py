@@ -13,7 +13,7 @@ def payment_doc_storage(instance, filename):
     ext = filename.split(".")[-1]
     uuid_filename = "{}.{}".format(uuid.uuid4(), ext)
     #return "payment_documents_storage/{0}".format(uuid_filename)
-    return f'payment_documents_storage/{instance.object_id}/{uuid_filename}'
+    return f'payment_documents_storage/{instance.invoice_payment}/{uuid_filename}'
 
 
 class InvoicePaymentStatus(models.IntegerChoices):

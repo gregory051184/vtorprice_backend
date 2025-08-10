@@ -8,6 +8,7 @@ from user.api import views
 router = DefaultRouter()
 
 router.register(r"users", views.AuthViewSet, basename="users")
+router.register(r"users_actions", views.UserActionsViewSet, basename="users_actions")
 
 urlpatterns = [
     path(

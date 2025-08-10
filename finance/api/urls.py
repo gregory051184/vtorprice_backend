@@ -8,5 +8,10 @@ router.register(
     views.InvoicePaymentViewSet,
     basename="invoice_payments",
 )
+router.register(
+    r"payment_orders",
+    views.PaymentOrderViewSet,
+    basename="payment_orders",
+)
 # router.register(r"payment_orders", views.PaymentOrderViewSet, basename="payment_orders")
 urlpatterns = router.urls

@@ -30,7 +30,7 @@ from common.model_fields import (
 from common.models import (
     BaseModel,
     DeliveryFieldsModelMixin,
-    AddressFieldsModelMixin, BaseNameDescModel, BaseNameModel,
+    AddressFieldsModelMixin, BaseNameModel,
 )
 from common.utils import (
     subtract_percentage,
@@ -38,7 +38,7 @@ from common.utils import (
     get_current_user_id,
     generate_random_sequence,
 )
-from company.models import CompanyStatus, Company
+from company.models import Company, CompanyStatus
 from exchange.signals import deal_completed, application_status_changed
 
 User = get_user_model()
@@ -72,7 +72,10 @@ class DocumentModel(BaseModel):
         ContentType, verbose_name="Тип контента", on_delete=models.CASCADE
     )
     company = models.ForeignKey(
-        Company, verbose_name="Компания", on_delete=models.CASCADE, null=True
+        Company,
+        verbose_name="Компания",
+        on_delete=models.CASCADE,
+        null=True
     )
     object_id = models.PositiveIntegerField()
     content_object = GenericForeignKey("content_type", "object_id")
@@ -163,6 +166,7 @@ class ApplicationStatus(models.IntegerChoices):
     PUBLISHED = 2, "Опубликована"
     CLOSED = 3, "Завершена"
     DECLINED = 4, "Отклонена"
+    DELETE_PERMANENTLY = 5, "Удалено перманентно"
 
 
 class ApplicationRecyclableStatus(models.IntegerChoices):
@@ -629,6 +633,31 @@ class Review(BaseModel):
         verbose_name_plural = "Отзывы"
 
 
+class ContractsStatisticsMark(BaseModel):
+    # company = models.ForeignKey(
+    #     "company.Company",
+    #     verbose_name="Компания",
+    #     on_delete=models.CASCADE,
+    #     related_name="contracts_statistics_mark",
+    # )
+    #
+    # application = models.ForeignKey(
+    #     "exchange.RecyclablesApplication",
+    #     verbose_name="Заявка",
+    #     on_delete=models.CASCADE,
+    #     related_name="application_statistics_mark",
+    # )
+    company_id = models.IntegerField(verbose_name='Id компании')
+    company_name = models.CharField(verbose_name='Название компании', max_length=512)
+    recyclable_application_id = models.IntegerField(verbose_name='Id заявки')
+    recyclable_id = models.IntegerField(verbose_name='Id фракции')
+    recyclable_name = models.CharField(verbose_name='Название фракции', max_length=512)
+    recyclable_category_id = models.IntegerField(verbose_name='Id категории')
+    recyclable_category_name = models.CharField(verbose_name='Название категории', max_length=512)
+    deal_type = get_field_from_choices("Тип сделки", DealType)
+    price = AmountField("Цена за единицу веса")
+
+
 class EquipmentApplication(
     BaseModel, AddressFieldsModelMixin, ApplicationSaveMixin
 ):
@@ -670,6 +699,7 @@ class EquipmentApplication(
     manufacture_date = models.DateField("Дата производства")
     was_in_use = models.BooleanField("Б/У", default=False)
     sale_by_parts = models.BooleanField("Продажа по частям", default=False)
+    description = models.TextField("Описание", default="", blank=True, null=True)
     images = GenericRelation(
         "exchange.ImageModel",
         verbose_name="Фотографии оборудования",

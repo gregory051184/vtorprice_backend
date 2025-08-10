@@ -1,5 +1,7 @@
+import http
 import json
 import os
+from dadata import Dadata
 
 import django_filters
 from django.db import models
@@ -9,7 +11,6 @@ from djangorestframework_camel_case.parser import (
     CamelCaseFormParser,
     CamelCaseMultiPartParser,
 )
-
 from django.core.mail import send_mail
 from requests import post
 from drf_yasg import openapi as api
@@ -30,16 +31,15 @@ from common.utils import (
     get_search_terms_from_request,
     str2bool,
     get_grouped_qs,
-    get_nds_tax,
+    get_nds_tax, equals_in_company_and_request,
 )
 from common.views import (
     BulkCreateMixin,
     MultiSerializerMixin,
     CompanyOwnerQuerySetMixin,
     NestedRouteQuerySetMixin,
-    FavoritableMixin,
+    FavoritableMixin, CompanyQueryMixin,
 )
-
 from company.api.serializers import (
     CompanySerializer,
     CompanyDocumentSerializer,
@@ -61,6 +61,7 @@ from company.api.serializers import (
     ListCompanySerializer,
     CitySerializer,
     RegionSerializer, ProposalSerializer, SubscribeSerializer, SubscribeCompanySerializer, EquipmentProposalSerializer,
+    DistrictSerializer, CompaniesListForMainFilterSerializer
 )
 from company.models import (
     Company,
@@ -75,22 +76,21 @@ from company.models import (
     CompanyVerificationRequestStatus,
     ActivityType,
     Region, Proposal,
-    Subscribe, SubscribesCompanies, EquipmentProposal
+    Subscribe, SubscribesCompanies, EquipmentProposal, District
 )
 from company.services.company_data.get_data import get_companies
+from company.signals import change_company_fields
 from exchange.api.serializers import DealReviewSerializer
-from exchange.models import Review
+from exchange.models import Review, RecyclablesApplication
 from user.models import UserRole
 
 
 class CompanyViewSet(
+    CompanyQueryMixin,
     MultiSerializerMixin,
     FavoritableMixin,
     viewsets.ModelViewSet,
 ):
-    # Запрос в БД возвращает список компаний с экземплярами из связанных таблицами,
-    # а также создаёт вычисляемые поля recyclables_count - количество материалов для переработки
-    # и monthly_volume - объём материалов за месяц
     queryset = (
         Company.objects.select_related("city")
         .prefetch_related(
@@ -99,9 +99,12 @@ class CompanyViewSet(
             "contacts",
             "activity_types",
             "review_set",
+            "city__region",
+            "city__region__district",
         )
-        .annotate(recyclables_count=Count("recyclables"))
-        .annotate(monthly_volume=models.Sum("recyclables__monthly_volume"))
+        .annotate(recyclables_count=Count("recyclables", distinct=True))
+        # .annotate(monthly_volume=models.Sum("recyclables__monthly_volume"))
+        .annotate(monthly_volume=models.Sum("recyclables_applications__volume"))
     )
 
     serializer_classes = {
@@ -124,11 +127,16 @@ class CompanyViewSet(
         # "activity_types": ["exact"],
         "activity_types__rec_col_types": ["exact"],
         "activity_types__advantages": ["exact"],
-        "recyclables__recyclables": ["exact"],
+        # "recyclables__recyclables": ["exact"],
+        "recyclables_applications__recyclables": ["exact"],
         "status": ["exact"],
         "city": ["exact"],
         "manager": ["exact"],
         "created_at": ["gte", "lte"],
+        "city__region": ["exact"],
+        "city__region__district": ["exact"],
+        "with_nds": ["exact"],
+        "recyclables_applications__urgency_type": ["exact"],
     }
 
     def update(self, request, *args, **kwargs):
@@ -140,12 +148,21 @@ class CompanyViewSet(
         #    os.remove(os.getcwd() + '/media/' + str(company.image))
         #    company.image = ''
         #    company.save()
+        if request.data.get("status") == "5":
+            company.is_deleted = 1
+            company.save()
+        if request.data.get("status") != "5" and company.is_deleted == 1:
+            company.is_deleted = 0
+            company.save()
+        # ДЛЯ ЗАПИСИ В МОДЕЛЬ ПО КОНТРОЛЮ ДЕЙСТВИЙ ПОЛЬЗОВАТЕЛЯ
+        lst = equals_in_company_and_request(company, **request.data)
+        change_company_fields.send_robust(sender=Company, instance=company, user=request.user, kwargs=lst)
+
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-
         if getattr(instance, '_prefetched_objects_cache', None):
             # If 'prefetch_related' has been applied to a queryset, we need to
             # forcibly invalidate the prefetch cache on the instance.
@@ -155,14 +172,12 @@ class CompanyViewSet(
 
     def get_queryset(self):
         qs = super().get_queryset()
-
-        if (self.request.query_params.get('activity_types')):
+        # ОПРЕДЕЛЯЕТ ПОСТАВЩИКА, ПЕРЕРАБОТЧИКА, ПОКУПАТЕЛЯ
+        if self.request.query_params.get('activity_types'):
             activity_types = int(self.request.query_params.get('activity_types'))
             qs = qs.filter(activity_types__rec_col_types__companyactivitytype__activity=activity_types)
-
         # если используются методы put и patch, то queryset меняется
         if self.action in ("put", "patch"):
-
             # дополнительная фильтрация по владельцу компании(owner)
             if self.request.user.role == UserRole.COMPANY_ADMIN:
                 return qs.filter(owner=self.request.user)
@@ -176,7 +191,7 @@ class CompanyViewSet(
                 return qs
             else:
                 return qs.none()
-        return qs
+        return qs.distinct()
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -200,13 +215,38 @@ class CompanyViewSet(
         contains a company that does not exist in the database
         """
         queryset = self.filter_queryset(self.get_queryset())
+        queryset = self.query_filters(queryset, request.query_params)
+        if self.request.query_params.get('exist_company_recyclables'):
+            lst = []
+            company_recyclables_count = int(self.request.query_params.get('exist_company_recyclables'))
+            if company_recyclables_count == 1:
+                queryset = queryset.filter(recyclables_count__gte=1)
+            if company_recyclables_count == 2:
+                queryset = queryset.filter(recyclables_count__lte=0)
+            if company_recyclables_count == 3:
+                queryset = queryset.filter(recyclables_count__gte=1, recyclables_count__lte=2)
+            if company_recyclables_count == 4:
+                queryset = queryset.filter(recyclables_count__lte=4, recyclables_count__gte=3)
+            if company_recyclables_count == 5:
+                queryset = queryset.filter(recyclables_count__gte=5)
+
+        # if (request.query_params.get('ordering') == "recyclables_count"):
+        #     queryset = sorted(queryset, key=lambda x: (x.recyclables.count()), reverse=False)
 
         non_exist = False
         # проверяем является ли queryset списком и если да, то ставим в True non_exist
         if isinstance(queryset, list):
             non_exist = True
 
+        # lst = []
+        # if request.query_params.get("recyclables_applications__urgency_type"):
+        #     for company in queryset:
+        #         applications = RecyclablesApplication.objects.filter(urgency_type=2, recyclables__id=6,
+        #                                                              company__id=company.id)
+        #         if applications:
+        #             lst.append(company)
         page = self.paginate_queryset(queryset)
+
         if page is not None:
             if non_exist:
                 serializer = NonExistCompanySerializer(page, many=True)
@@ -228,8 +268,57 @@ class CompanyViewSet(
         """
         Overridden to support retrieving a company that is not in the database
         """
-
         queryset = super().filter_queryset(queryset)
+
+        if self.request.query_params.get('is_jur_or_ip'):
+
+            is_jur_or_ip = int(self.request.query_params.get('is_jur_or_ip'))
+
+            if is_jur_or_ip == 1:
+                queryset = queryset.filter(name__icontains="ООО")
+
+            if is_jur_or_ip == 2:
+                queryset = queryset.filter(name__icontains="ИП")
+
+        # if self.request.query_params.get('company_failed_deals'):
+        #     company_failed_deals = int(self.request.query_params.get('company_failed_deals'))
+        #     if company_failed_deals == 2:
+        #         apps_ids = RecyclablesDeal.objects.filter(Q(status=DealStatus.PROBLEM)).values_list("application",
+        #                                                                                             flat=True)
+        #         queryset = queryset.filter(id__in=apps_ids)
+        #     if company_failed_deals == 1:
+        #         apps_ids = RecyclablesDeal.objects.filter(~Q(status=DealStatus.PROBLEM)).values_list("application",
+        #                                                                                              flat=True)
+        #         queryset = queryset.filter(id__in=apps_ids)
+        #
+        # if self.request.query_params.get('company_volume'):
+        #
+        #     company_volume = int(self.request.query_params.get('company_volume'))
+        #
+        #     deals = RecyclablesDeal.objects.all()
+        #
+        #     companies_buy_ids = deals.values_list("buyer_company_id", flat=True)
+        #     companies_sell_ids = deals.values_list("supplier_company_id", flat=True)
+        #
+        #     full_list = list(chain(companies_sell_ids, companies_buy_ids))
+        #     current_apps_ids = []
+        #     for i in full_list:
+        #         deals_sum = 0
+        #         lst = []
+        #
+        #         for j in deals:
+        #
+        #             if i == j.buyer_company_id:
+        #                 deals_sum += j.weight
+        #                 lst.append(j.buyer_company_id)
+        #                 deals_sum += j.weight
+        #             if i == j.supplier_company_id:
+        #                 lst.append(j.supplier_company_id)
+        #         if deals_sum >= company_volume:
+        #             current_apps_ids.extend(lst)
+        #
+        #     queryset = queryset.filter(id__in=current_apps_ids)
+
         # возвращает условий поиска в виде списка строк
         search_terms = get_search_terms_from_request(self.request)
 
@@ -245,6 +334,70 @@ class CompanyViewSet(
             queryset = get_companies(query)
 
         return queryset
+
+    # ДЛЯ АВТОЗАПИСИ ПОЗЖЕ УДАЛИТЬ
+    @action(methods=["GET"], detail=False)
+    def update_for_maxim(self, request, *args, **kwargs):
+
+        companies = Company.objects.all()[1:4]
+
+        for company in companies:
+            if len(company.inn) >= 10:
+                dadata = Dadata('8118fbfe3e47992be56928944189d122141017b9')
+                result = dadata.suggest("party", company.inn)
+                district = District.objects.get_or_create(
+                    name=result[0]["data"]["address"]["data"]["federal_district"] + " " + "Федеральный Округ",
+                    defaults={
+                        "name": result[0]["data"]["address"]["data"]["federal_district"] + " " + "Федеральный Округ"})
+                district[0].save()
+
+                region = Region.objects.get_or_create(name=result[0]["data"]["address"]["data"]["region_with_type"],
+                                                      defaults={"name": result[0]["data"]["address"]["data"][
+                                                          "region_with_type"]})
+                region[0].district = district[0]
+                region[0].save()
+
+                city = City.objects.get_or_create(name=result[0]["data"]["address"]["data"]["city"],
+                                                  defaults={"name": result[0]["data"]["address"]["data"]["city"],
+                                                            "region_id": region[0].id})
+                # city[0].region = region[0].id
+                city[0].save()
+
+                company.name = result[0]["data"]["name"]["full_with_opf"]
+                company.head_full_name = result[0]["data"]["management"]["name"] if result[0]["data"]["management"][
+                    "name"] else f'{result[0]["data"]["fio"]["surname"]} {result[0]["data"]["fio"]["name"]} {result[0]["data"]["fio"]["patronymic"]}'
+                company.address = result[0]["data"]["address"]["unrestricted_value"]
+                company.latitude = result[0]["data"]["address"]["data"]["geo_lat"]
+                company.latitude = result[0]["data"]["address"]["data"]["geo_lon"]
+                company.city = city[0]
+                company.save()
+            return Response(status=http.HTTPStatus.CREATED)
+
+        # ___________________________________________________________________________________________________________________
+
+        #
+        # company = get_object_or_404(Company, id=int(kwargs['pk']))
+        # if request.data.get('image') is not None:
+        #     if company.image != '':
+        #         os.remove(os.getcwd() + '/media/' + str(company.image))
+        #
+
+        # search_terms = get_search_terms_from_request(request)
+        # query = search_terms[0]
+        # queryset = get_companies(query)
+        #
+        # partial = kwargs.pop('partial', False)
+        # instance = self.get_object()
+        # serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        # serializer.is_valid(raise_exception=True)
+        # self.perform_update(serializer)
+        #
+        # if getattr(instance, '_prefetched_objects_cache', None):
+        #     # If 'prefetch_related' has been applied to a queryset, we need to
+        #     # forcibly invalidate the prefetch cache on the instance.
+        #     instance._prefetched_objects_cache = {}
+        #
+        # return Response(serializer.data)
 
     # Определяет список прав у пользователей
     def get_permissions(self):
@@ -274,6 +427,70 @@ class CompanyViewSet(
     @action(methods=["GET"], detail=False)
     def nds_tax(self, request, *args, **kwargs):
         return Response(get_nds_tax(), status=status.HTTP_200_OK)
+
+    @action(methods=["GET"], detail=False)
+    def companies_with_applications_for_main_filter(self, request, *args, **kwargs):
+        filter_query = self.filter_queryset(self.get_queryset().select_related("city")
+                                            .prefetch_related(
+            "documents",
+            "recyclables",
+            "contacts",
+            "activity_types",
+            "review_set",
+            "city__region",
+            "city__region__district",
+        )
+                                            .annotate(recyclables_count=Count("recyclables"))
+                                            .annotate(monthly_volume=models.Sum("recyclables__monthly_volume")))
+        filter_query = self.query_filters(filter_query, request.query_params)
+        # filter_query = filter_query.filter(company_recyclables__contains=recyclable)
+
+        # def get_ids_list_for_apps(query):
+        #     listed = set()
+        #     for i in query:
+        #         listed.add(i.company_id)
+        #     listed = list(listed)
+        #     return listed
+        #
+        # def get_ids_list(query):
+        #     listed = set()
+        #     for i in query:
+        #         listed.add(i.id)
+        #     listed = list(listed)
+        #     return listed
+        #
+        # non_exist = False
+        # if isinstance(filter_query, list):
+        #     non_exist = True
+        #
+        # applications = RecyclablesApplication.objects.filter(company_id__in=get_ids_list(filter_query))
+        # if self.request.query_params.get('company_has_applications'):
+        #     current_apps = int(self.request.query_params.get('company_has_applications'))
+        #     if current_apps == 2:
+        #         applications = applications.filter(~Q(status=ApplicationStatus.CLOSED),
+        #                                            company_id__in=get_ids_list(filter_query))
+        #     if current_apps == 1:
+        #         applications = applications.filter(Q(status=ApplicationStatus.CLOSED),
+        #                                            company_id__in=get_ids_list(filter_query))
+        # if self.request.query_params.get('company_has_supply_contract'):
+        #     urgency_type = int(self.request.query_params.get('company_has_supply_contract'))
+        #     if urgency_type == 2:
+        #         applications = applications.filter(Q(urgency_type=UrgencyType.SUPPLY_CONTRACT),
+        #                                            company_id__in=get_ids_list(filter_query))
+        #     if urgency_type == 1:
+        #         applications = applications.filter(~Q(urgency_type=UrgencyType.SUPPLY_CONTRACT),
+        #                                            company_id__in=get_ids_list(filter_query))
+        #
+        # response_companies = Company.objects.filter(id__in=get_ids_list_for_apps(applications))
+        non_exist = False
+        if isinstance(filter_query, list):
+            non_exist = True
+        page = self.paginate_queryset(filter_query)
+        if non_exist:
+            serializer = NonExistCompanySerializer(page, many=True)
+        else:
+            serializer = CompaniesListForMainFilterSerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
 
 class CompanySettingsViewMixin:
@@ -308,7 +525,6 @@ class CompanySettingsViewMixin:
             )
         ]
     )
-    # Переопределяет метод list
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
@@ -360,6 +576,24 @@ class CompanyRecyclablesViewSet(
     # Переменные используемая в NestedRouteQuerySetMixin
     create_with_removal = True
     nested_route_lookup_field = "company_pk"
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        recyclables_application = RecyclablesApplication.objects.get(company__recyclables__id=instance.company.id,
+                                                                     volume=instance.monthly_volume,
+                                                                     recyclables__id=instance.recyclables.id,
+                                                                     deal_type=instance.action, price=instance.price)
+        has_deal = recyclables_application.deals.id if recyclables_application.deals else 0
+
+        if has_deal > 0:
+            recyclables_application.is_deleted = True
+            recyclables_application.save()
+        else:
+            recyclables_application.delete()
+
+        self.perform_destroy(instance)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @swagger_auto_schema(
         manual_parameters=[
@@ -552,7 +786,14 @@ class CompanyReviewsViewset(
     serializer_class = DealReviewSerializer
 
 
-# ViewSet по работе с представлениями Region
+class DistrictViewSet(generics.ListAPIView, viewsets.GenericViewSet):
+    queryset = District.objects.all()
+    serializer_class = DistrictSerializer
+    permission_classes = [AllowAny]
+    filter_backends = (filters.SearchFilter,)
+    search_fields = ("name",)
+
+
 class RegionViewSet(generics.ListAPIView, viewsets.GenericViewSet):
     queryset = Region.objects.all()
     serializer_class = RegionSerializer

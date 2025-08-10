@@ -94,7 +94,7 @@ class AmountField(DecimalField):
         self,
         verbose_name=None,
         name=None,
-        max_digits=10,
+        max_digits=13,
         decimal_places=2,
         **kwargs,
     ):

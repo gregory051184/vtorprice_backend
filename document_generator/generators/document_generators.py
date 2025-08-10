@@ -41,6 +41,7 @@ def generate_current_date():
     c[1] = month_rus
     return ' '.join(c)
 
+
 class BaseGenerator:
     replacing_mapping: dict[str, str] = None
     template_file_path: str = None
@@ -304,12 +305,12 @@ class AgreementSpecification(BaseGenerator):
             "%deal_total_price%": str(float(deal.price) * deal.weight),
             "%deal_number%": deal.deal_number,
 
-            "%date%": generate_current_date(), #datetime.datetime.now().strftime("%d.%B.%Y"),
+            "%date%": generate_current_date(),  # datetime.datetime.now().strftime("%d.%B.%Y"),
 
             # Добавил новые
             "%contract_number%": deal.deal_number + '/' + datetime.datetime.now().strftime("%d.%M.%Y"),
             # str(deal.created_at).split('-')[0],
-            "%contract_date%": generate_current_date() #str(deal.created_at).split(' ')[0],
+            "%contract_date%": generate_current_date()  # str(deal.created_at).split(' ')[0],
 
         }
 
@@ -327,9 +328,9 @@ class AgreementSpecification(BaseGenerator):
                     "%supplier_director_full%": deal.supplier_company.head_full_name,
                     "%supplier_rs%": deal.supplier_company.payment_account,
                     "%supplier_director_full": deal.supplier_company.head_full_name,
-                    "%supplier_director%": deal.supplier_company.head_full_name.split(' ')[0] + ' ' +
-                                           deal.supplier_company.head_full_name.split(' ')[1][0] + '.' +
-                                           deal.supplier_company.head_full_name.split(' ')[2][0] + '.',
+                    "%supplier_director%": deal.supplier_company.head_full_name,  # .split(' ')[0] + ' ' +
+                    # deal.supplier_company.head_full_name.split(' ')[1][0] + '.' +
+                    # deal.supplier_company.head_full_name.split(' ')[2][0] + '.',
                     "%buyer_cs%": deal.supplier_company.correction_account
                 }
             )
@@ -349,9 +350,9 @@ class AgreementSpecification(BaseGenerator):
                     "%buyer_bic%": deal.buyer_company.bic,
                     "%buyer_director_full%": deal.buyer_company.head_full_name,
                     "%buyer_rs%": deal.buyer_company.payment_account,
-                    "%buyer_director%": deal.buyer_company.head_full_name.split(' ')[0] + ' ' +
-                                        deal.buyer_company.head_full_name.split(' ')[1][0] + '.' +
-                                        deal.buyer_company.head_full_name.split(' ')[2][0] + '.',
+                    "%buyer_director%": deal.buyer_company.head_full_name,  # .split(' ')[0] + ' ' +
+                    # deal.buyer_company.head_full_name.split(' ')[1][0] + '.' +
+                    # deal.buyer_company.head_full_name.split(' ')[2][0] + '.',
                     "%buyer_cs%": deal.buyer_company.correction_account
                 }
             )
@@ -402,6 +403,7 @@ class AgreementApplication(ContractorApplicationGeneratorMixin, BaseGenerator):
         self.output_file_name = f"generated_storage/deal_id_{self.transport_application.object_id}/Договор-Заявка по заявке №{self.transport_application.id}.docx"
 
         self.replacing_mapping = self.build_replacing_mapping()
+
     def build_replacing_mapping(self):
         deal = self.transport_application.deal
         mapping = super().build_replacing_mapping()
@@ -438,7 +440,7 @@ class AgreementApplication(ContractorApplicationGeneratorMixin, BaseGenerator):
                                     deal.buyer_company.head_full_name.split(' ')[2][0] + '.',
                 "%buyer_cs%": deal.buyer_company.correction_account,
                 "%contract_number%": deal.deal_number + '/' + datetime.datetime.now().strftime("%d.%M.%Y"),
-                "%date%": generate_current_date() #datetime.datetime.now().strftime("%d.%B.%Y"),
+                "%date%": generate_current_date()  # datetime.datetime.now().strftime("%d.%B.%Y"),
             }
         )
 
@@ -510,7 +512,7 @@ class Act(BaseGenerator):
         self.price_per_kg = 1
         self.replacing_mapping = self.build_replacing_mapping()
         name = self.company.name.replace('"', '')
-        self.output_file_name = f"generated_storage/deal_id_{self.deal.id}/Акт по заявке №{self.deal.deal_number} для {name}.docx"
+        self.output_file_name = f"generated_storage/deal_id_{self.deal.id}/Акт по заявке №{self.deal.deal_number}-{self.company.id}.docx"
 
     def build_replacing_mapping(self):
         return {
@@ -526,13 +528,14 @@ class Act(BaseGenerator):
             "%buyer_bic%": self.company.bic,
             "%buyer_director_full%": self.company.head_full_name,
             "%buyer_rs%": self.company.payment_account,
-            "%buyer_director%": self.company.head_full_name.split(' ')[0] + ' ' +
-                                self.company.head_full_name.split(' ')[1][0] + '.' +
-                                self.company.head_full_name.split(' ')[2][0] + '.',
+            "%buyer_director%": self.company.head_full_name,  # .split(' ')[0] + ' ' +
+            # self.company.head_full_name.split(' ')[1][0] + '.' +
+            # self.company.head_full_name.split(' ')[2][0] + '.',
             "%buyer_cs%": self.company.correction_account,
             "%buyer_bank%": self.company.bank_name,
-            "current_datetime": datetime.datetime.now().strftime("%d.%M.%Y"),
-            "act_number": self.deal.deal_number + '/' + datetime.datetime.now().strftime("%d.%M.%Y")
+            "%current_datetime%": datetime.datetime.now().strftime('%d-%m-%Y'),  # datetime.datetime.now().strftime("%d.%M.%Y"),
+            "%act_number%": self.deal.deal_number + '/' + datetime.datetime.now().strftime('%d-%m-%Y')
+            # datetime.datetime.now().strftime("%d.%M.%Y")
         }
 
 
@@ -548,14 +551,45 @@ class InvoiceDocument(AgreementSpecification, BaseGenerator):
         self.input_template_file_path = f"{settings.PROJECT_DIR}/document_generator/templates/Счёт поставка.docx"
         self.document = Document(self.input_template_file_path)
         self.output_file_name = (
-            f"generated_storage/deal_id_{self.invoice.deal.id}/Счёт поставка {self.invoice.deal.id}.docx"
+            f"generated_storage/deal_id_{self.invoice.deal.id}/Счёт поставка {self.invoice.id}.docx"
             # f"generated_storage/Счёт поставка {invoice.id}.docx"
         )
+
     def build_replacing_mappings(self):
         mappings = super().build_replacing_mappings()
         mappings.update(
             {
-                "%invoice_number%": self.invoice.deal.id,
+                "%invoice_number%": self.invoice.id,
+                "%date": str(datetime.datetime.now()),
+                "%count%": self.deal.weight,
+                "%price_per_kg%": self.price_per_kg,
+                "%total_sum%": self.price_per_kg * self.deal.weight
+            }
+        )
+        return mappings
+
+
+class InvoiceSupplierDocument(AgreementSpecification, BaseGenerator):
+    def __init__(self, invoice: InvoicePayment):
+        self.invoice = invoice
+        self.price_per_kg = 1
+        super().__init__(invoice.deal)
+        if not os.path.exists(
+                f"{settings.MEDIA_ROOT}/generated_storage/deal_id_{self.invoice.deal.id}"):
+            os.makedirs(f"{settings.MEDIA_ROOT}/generated_storage/deal_id_{self.invoice.deal.id}")
+
+        self.input_template_file_path = f"{settings.PROJECT_DIR}/document_generator/templates/Счёт поставка продавец.docx"
+        self.document = Document(self.input_template_file_path)
+        self.output_file_name = (
+            f"generated_storage/deal_id_{self.invoice.deal.id}/Счёт поставка {self.invoice.id} продавец.docx"
+            # f"generated_storage/Счёт поставка {invoice.id}.docx"
+        )
+
+    def build_replacing_mappings(self):
+        mappings = super().build_replacing_mappings()
+        mappings.update(
+            {
+                "%invoice_number%": self.invoice.id,
                 "%date": str(datetime.datetime.now()),
                 "%count%": self.deal.weight,
                 "%price_per_kg%": self.price_per_kg,

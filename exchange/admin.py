@@ -9,7 +9,7 @@ from exchange.models import (
     UrgencyType,
     EquipmentApplication,
     EquipmentDeal,
-    Review,
+    Review, ContractsStatisticsMark,
 )
 
 
@@ -206,3 +206,8 @@ class EquipmentDealAdmin(BaseModelAdmin):
         return obj.total_price
 
     total_price_property.short_description = "Общая стоимость"
+
+
+@admin.register(ContractsStatisticsMark)
+class ContractsStatisticsMarkAdmin(BaseModelAdmin):
+    pass

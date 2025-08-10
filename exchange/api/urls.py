@@ -12,6 +12,18 @@ router.register(
 )
 
 router.register(
+    r"all_recyclables_applications",
+    views.AllRecyclablesApplicationsViewSet,
+    basename="all_recyclables_applications"
+)
+
+router.register(
+    r"contracts_statistics_mark",
+    views.ContractsStatisticsMarkViewSet,
+    basename="contracts_statistics_mark"
+)
+
+router.register(
     r"equipment_applications",
     views.EquipmentApplicationViewSet,
     basename="equipment_applications",

@@ -1,3 +1,4 @@
+import http
 import os
 
 from django.contrib.contenttypes.models import ContentType
@@ -13,11 +14,13 @@ from rest_framework.generics import get_object_or_404
 from django.db.models import Q
 
 from common.serializers import EmptySerializer
+from company.models import Company
 from exchange.api.serializers import (
     CreateImageModelSerializer,
     CreateDocumentModelSerializer,
 )
-from exchange.models import ImageModel, DocumentModel, DealType
+from exchange.models import ImageModel, DocumentModel, DealType, RecyclablesApplication, RecyclablesDeal, DealStatus, \
+    UrgencyType, Review
 from exchange.services import filter_qs_by_coordinates
 from user.models import UserRole, Favorite
 from drf_yasg import openapi as api
@@ -247,7 +250,6 @@ class FavoritableMixin:
         permission_classes=[IsAuthenticated],
     )
     def favorite(self, request, *args, **kwargs):
-
         obj = self.get_object()
         requested_user = request.user
         content_type = ContentType.objects.get_for_model(obj)
@@ -256,7 +258,6 @@ class FavoritableMixin:
             content_type=content_type,
             object_id=obj.id,
         )
-
         if not created:
             favorite_object.delete()
         return self.retrieve(request, *args, **kwargs)
@@ -314,9 +315,11 @@ class RecyclableApplicationsQuerySetMixin:
             return qs if dick.get('ordering') is None else qs.order_by(dick.get('ordering'))
 
     def split_query_params(self, qs, dick: QueryDict, params):
+        if dick.get('no_page'):
+            return qs
         if dick.get('company'):
             company = dick.get('company')
-            return self.get_urgency_type(qs, dick).filter(company_id=company[0])
+            return self.get_urgency_type(qs, dick).filter(company_id=company)
 
         if params.get('pk') or dick.get('search') == '':
             return self.get_urgency_type(qs, dick)
@@ -340,6 +343,121 @@ class RecyclableApplicationsQuerySetMixin:
                 return qs
         else:
             return qs
+
+
+class CompanyQueryMixin:
+    # Эти фильтры для страницы фильтрации компаний (/companies/main)
+    def query_filters(self, query, request_params: QueryDict):
+        qs = query
+
+        if request_params.get('recyclables__recyclables'):
+            recyclable = int(request_params.get('recyclables__recyclables'))
+            companies = RecyclablesApplication.objects.filter(recyclables=recyclable).values_list(
+                'company_id', flat=True)
+            companies_ids = list(set(companies))
+            qs = qs.filter(id__in=companies_ids)
+
+        if request_params.get('company_failed_deals'):
+            failed_deals = int(request_params.get('company_failed_deals'))
+            if failed_deals == 2:
+                buyer_companies_ids = RecyclablesDeal.objects.filter(status__lte=DealStatus.COMPLETED).values_list(
+                    'buyer_company_id', flat=True)
+                supplier_companies_ids = RecyclablesDeal.objects.filter(status__lte=DealStatus.COMPLETED).values_list(
+                    'supplier_company_id', flat=True)
+                companies_ids = list(set(list(buyer_companies_ids) + list(supplier_companies_ids)))
+                qs = qs.filter(id__in=companies_ids)
+            if failed_deals == 1:
+                buyer_companies_ids = RecyclablesDeal.objects.filter(status__gte=DealStatus.PROBLEM).values_list(
+                    'buyer_company_id', flat=True)
+                supplier_companies_ids = RecyclablesDeal.objects.filter(status__gte=DealStatus.PROBLEM).values_list(
+                    'supplier_company_id', flat=True)
+                companies_ids = list(set(list(buyer_companies_ids) + list(supplier_companies_ids)))
+                qs = qs.filter(id__in=companies_ids)
+
+        if request_params.get('deals_count'):
+            deals_count = int(request_params.get('deals_count'))
+            buyer_companies_ids = RecyclablesDeal.objects.filter(status__lte=DealStatus.COMPLETED).values_list(
+                'buyer_company_id', flat=True)
+            supplier_companies_ids = RecyclablesDeal.objects.filter(status__lte=DealStatus.COMPLETED).values_list(
+                'supplier_company_id', flat=True)
+            companies_ids_by_deals = list(buyer_companies_ids) + list(supplier_companies_ids)
+            current_companies_ids = []
+            for company_id in companies_ids_by_deals:
+                count = companies_ids_by_deals.count(company_id)
+                if count >= deals_count:
+                    current_companies_ids.append(company_id)
+            qs = qs.filter(id__in=current_companies_ids)
+
+        if request_params.get('company_volume'):
+            clear_company_ids = []
+            company_volume = int(request_params.get('company_volume'))
+            applications = RecyclablesApplication.objects.filter(
+                urgency_type=UrgencyType.SUPPLY_CONTRACT)
+            for company_id in applications.values_list("company_id"):
+                company_contracts_volume = []
+                for app in applications:
+                    if company_id == app.company_id:
+                        company_contracts_volume.append(app.volume)
+                if sum(company_contracts_volume) >= company_volume:
+                    clear_company_ids.append(company_id)
+            qs = qs.filter(id__in=clear_company_ids)
+
+        if request_params.get('deal_type'):
+            deal_type = int(request_params.get('deal_type'))
+            if deal_type == 1:
+                companies_ids = RecyclablesApplication.objects.filter(deal_type=DealType.BUY).values_list(
+                    'company_id', flat=True)
+                qs = qs.filter(id__in=companies_ids)
+            if deal_type == 2:
+                companies_ids = RecyclablesApplication.objects.filter(deal_type=DealType.SELL).values_list(
+                    'company_id', flat=True)
+                qs = qs.filter(id__in=companies_ids)
+
+        if request_params.get('company_has_applications'):
+            has_apps = request_params.get('company_has_applications')
+            if has_apps == 1:
+                companies = RecyclablesApplication.objects.filter(
+                    urgency_type=UrgencyType.READY_FOR_SHIPMENT).values_list(
+                    'company_id', flat=True)
+                companies_ids = list(set(companies))
+                qs = qs.filter(id__in=companies_ids)
+            if has_apps == 2:
+                companies = RecyclablesApplication.objects.filter(
+                    urgency_type=UrgencyType.SUPPLY_CONTRACT).values_list(
+                    'company_id', flat=True)
+                companies_ids = list(set(companies))
+                qs = qs.filter(id__in=companies_ids)
+
+        if request_params.get('rate'):
+            company_rate = int(request_params.get('rate'))
+            clear_company_ids = []
+            companies_ids = qs.values_list('id')
+            company_reviews = Review.objects.all()
+            if company_rate > 0:
+                for company in companies_ids:
+                    company_reviews_sum = []
+                    for review in company_reviews:
+                        if review.company_id == company:
+                            company_reviews_sum.append(int(review.rate))
+                    if sum(company_reviews_sum) > 0:
+                        current_company_rate = round(sum(company_reviews_sum) / len(company_reviews_sum))
+                        if current_company_rate >= company_rate:
+                            clear_company_ids.append(company)
+                qs = qs.filter(id__in=clear_company_ids)
+            else:
+                qs = qs
+
+        # if request_params.get('recyclables_applications__urgency_type'):
+        #     urgency_type = int(request_params.get('recyclables_applications__urgency_type'))
+        #     if urgency_type == 1:
+        #         companies_ids = RecyclablesApplication.objects.filter(urgency_type=UrgencyType.READY_FOR_SHIPMENT).values_list(
+        #             'company_id', flat=True)
+        #         qs = qs.filter(id__in=companies_ids)
+        #     if urgency_type == 2:
+        #         companies_ids = RecyclablesApplication.objects.filter(urgency_type=UrgencyType.SUPPLY_CONTRACT).values_list(
+        #             'company_id', flat=True)
+        #         qs = qs.filter(id__in=companies_ids)
+        return qs
 
 
 class EquipmentApplicationsQuerySetMixin:

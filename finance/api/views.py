@@ -1,12 +1,15 @@
+import http
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Union
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models import Count
+from django_filters.rest_framework import DjangoFilterBackend
 from drf_yasg.utils import swagger_auto_schema
 from pydantic import BaseModel
-from rest_framework import viewsets
+from rest_framework import viewsets, filters, mixins
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotAuthenticated, PermissionDenied
 from rest_framework.generics import get_object_or_404
@@ -15,24 +18,25 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from drf_yasg import openapi as api
 
+from common.filters import FavoriteFilterBackend
 from common.views import MultiSerializerMixin
 from company.models import Company
 from document_generator.api.serializers import GeneratedDocumentSerializer
 from document_generator.common import get_or_generate_document
 from document_generator.generators.document_generators import (
     InvoiceDocument,
-    Act,
+    Act, InvoiceSupplierDocument,
 )
 from document_generator.models import (
     GeneratedDocumentType,
     GeneratedDocumentModel,
 )
 from exchange.models import RecyclablesApplication, EquipmentApplication, RecyclablesDeal
-from exchange.utils import get_truncation_class
+from exchange.utils import get_truncation_class, validate_period, get_lower_date_bound
 from finance.api.models import ManagerPaymentsOutput, TotalForMonth
 from finance.api.serializers import (
     InvoicePaymentSerializer,
-    CreatePaymentOrderSerializer,
+    CreatePaymentOrderSerializer, PaymentOrderSerializer,
 )
 from finance.models import InvoicePayment, InvoicePaymentStatus, PaymentOrder
 from statistic.api.models import GraphPoint, Graph
@@ -66,10 +70,24 @@ class PseudoInvoice(BaseModel):
 
 
 class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
-    queryset = InvoicePayment.objects.all()
+    queryset = InvoicePayment.objects.prefetch_related("company").distinct()
     permission_classes = [IsAuthenticated]
     default_serializer_class = InvoicePaymentSerializer
+    search_fields = ("company__name", "company__inn")
     parser_classes = [MultiPartParser, FormParser]
+    filter_backends = (
+        filters.SearchFilter,
+        filters.OrderingFilter,
+        DjangoFilterBackend,
+        FavoriteFilterBackend,
+    )
+
+    filterset_fields = {
+        "status": ["exact"],
+        "company": ["exact"],
+        "created_at": ["gte", "lte"],
+
+    }  # ("__all__")
 
     serializer_classes = {
         "send_payment_order": CreatePaymentOrderSerializer,
@@ -83,7 +101,7 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
         if user.is_anonymous:
             return qs.none()
         if user.role == UserRole.COMPANY_ADMIN:
-            return qs.filter(company=user.company).for_this_month()
+            return qs.filter(company=user.company)  # .for_this_month()
         if user.role == UserRole.MANAGER:
             return qs.filter(company__manager=user).paid()
         if user.role == UserRole.ADMIN:
@@ -121,7 +139,12 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
         application_m = deal_m.application
         if pk:
             invoice_payment = get_object_or_404(self.get_queryset(), pk=pk)
-            generator = InvoiceDocument(invoice_payment)
+            current_deal = RecyclablesDeal.objects.get(id=invoice_payment.object_id)
+            if current_deal.buyer_company.id == invoice_payment.company.id:
+                generator = InvoiceDocument(invoice_payment)
+            if current_deal.supplier_company.id == invoice_payment.company.id:
+                generator = InvoiceSupplierDocument(invoice_payment)
+            # generator = InvoiceDocument(invoice_payment)
             document_type = GeneratedDocumentType.INVOICE_DOCUMENT
             document = get_or_generate_document(
                 generator=generator,
@@ -154,7 +177,7 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
             deal_m = RecyclablesDeal(
                 id=deal_m.id,
                 weight=total_weight,
-                buyer_company=user.company,
+                buyer_company=deal_m.buyer_company,  # user.company,
                 price=total_price,
                 application=application_m,
                 deal_number=deal_m.deal_number,
@@ -178,7 +201,6 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
             gen_doc = GeneratedDocumentModel.objects.filter(object_id=1, document=generated_document)
             for document in gen_doc:
                 document.delete()
-
             for item in invoice_payment:
                 content_type = ContentType.objects.get_for_model(item)
                 to_create.append(
@@ -201,24 +223,48 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def get_act(self, request, pk=None, *args, **kwargs):
         invoice: InvoicePayment = self.get_object()
-        user = request.user
+        #user = request.user
         deal = invoice.deal
-
         content_type = ContentType.objects.get_for_model(deal)
-        generator = Act(company=request.user.company, deal=deal)
-        document_type = (
-            GeneratedDocumentType.ACT_BUYER
-            if deal.buyer_company == user.company
-            else GeneratedDocumentType.ACT_SELLER
-        )
-        document = get_or_generate_document(
-            generator=generator,
-            document_filter_kwargs={
-                "content_type": content_type,
-                "object_id": deal.id,
-                "type": document_type,
-            },
-        )
+        if deal.buyer_company.id == invoice.company.id:
+            print(f'buyer_company - {invoice.company}')
+            document_type = GeneratedDocumentType.ACT_BUYER
+            generator = Act(company=invoice.company, deal=deal)
+            document = get_or_generate_document(
+                generator=generator,
+                document_filter_kwargs={
+                    "content_type": content_type,
+                    "object_id": deal.id,
+                    "type": document_type,
+                },
+            )
+        else:
+            print(f'supplier_company - {deal.supplier_company}')
+            document_type = GeneratedDocumentType.ACT_SELLER
+            generator = Act(company=invoice.company, deal=deal)
+            document = get_or_generate_document(
+                generator=generator,
+                document_filter_kwargs={
+                    "content_type": content_type,
+                    "object_id": deal.id,
+                    "type": document_type,
+                },
+            )
+        # content_type = ContentType.objects.get_for_model(deal)
+        #generator = Act(company=request.user.company, deal=deal)
+        # document_type = (
+        #     GeneratedDocumentType.ACT_BUYER
+        #     if deal.buyer_company == user.company
+        #     else GeneratedDocumentType.ACT_SELLER
+        # )
+        # document = get_or_generate_document(
+        #     generator=generator,
+        #     document_filter_kwargs={
+        #         "content_type": content_type,
+        #         "object_id": deal.id,
+        #         "type": document_type,
+        #     },
+        # )
         return Response(GeneratedDocumentSerializer(document).data)
 
     @action(detail=True, methods=["post"])
@@ -226,12 +272,13 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
         """
         Отправить платежное поручение
         """
-        invoice_payment = self.get_object()
-        serializer = self.get_serializer(data=request.data)
+        serializer = PaymentOrderSerializer(data=request.data)
+        # invoice_payment = self.get_object()
+        # serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        invoice_payment.status = InvoicePaymentStatus.PAID
-        invoice_payment.save()
+        # invoice_payment.status = InvoicePaymentStatus.PAID
+        # invoice_payment.save()
 
         return Response(serializer.data)
 
@@ -412,8 +459,7 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
 
     @staticmethod
     def _get_count_graph_data(
-            TruncClass, qs, field_to_truncate="delivery_date"
-    ) -> list[dict]:
+            TruncClass, qs, field_to_truncate="delivery_date") -> list[dict]:
         truncated_applications = qs.annotate(
             truncated_date=TruncClass(field_to_truncate)
         ).order_by("truncated_date", f"-{field_to_truncate}")
@@ -428,3 +474,31 @@ class InvoicePaymentViewSet(MultiSerializerMixin, viewsets.ModelViewSet):
             for item in graph_data
         ]
         return graph_data
+
+    def list(self, request, *args, **kwargs):
+        period = validate_period(request.query_params.get("period", "all"))
+        get_truncation_class(period)
+        lower_date_bound = get_lower_date_bound(period)
+        queryset = self.filter_queryset(self.get_queryset())
+        if lower_date_bound:
+            queryset = queryset.filter(created_at__gte=lower_date_bound)
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class PaymentOrderViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    queryset = PaymentOrder.objects.all()
+
+    def destroy(self, request, *args, **kwargs):
+        user = request.user
+        document_to_delete = get_object_or_404(PaymentOrder, id=int(kwargs['pk']))
+        if user.company.id == document_to_delete.invoice_payment.company.id or user.role == UserRole.ADMIN or user.role == UserRole.MANAGER:
+            os.remove(os.getcwd() + '/media/' + str(document_to_delete.document))
+            return super().destroy(request, *args, **kwargs)
+        return Response(status=http.HTTPStatus.FORBIDDEN)

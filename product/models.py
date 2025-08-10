@@ -70,11 +70,11 @@ class RecyclablesQuerySet(BulkUpdateOrCreateQuerySet, models.QuerySet):
 
         sales_applications_count = models.Count(
             "applications",
-            filter=models.Q(applications__deal_type=DealType.SELL, **query),
+            filter=models.Q(applications__is_deleted=False, applications__deal_type=DealType.SELL, **query),
         )
         purchase_applications_count = models.Count(
             "applications",
-            filter=models.Q(applications__deal_type=DealType.BUY, **query),
+            filter=models.Q(applications__is_deleted=False, applications__deal_type=DealType.BUY, **query),
         )
         applications = self.model.applications.field.model.objects.filter(
             recyclables=models.OuterRef("pk"), **dict(applications_query)
@@ -178,7 +178,6 @@ class Recyclables(BaseNameDescModel):
 
 
 class Equipment(BaseNameDescModel):
-
     category = models.ForeignKey(
         "product.EquipmentCategory",
         verbose_name="Категория",

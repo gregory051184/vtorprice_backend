@@ -47,6 +47,7 @@ MEDIA_ROOT = os.path.join(PROJECT_DIR, "media/")
 
 INSTALLED_APPS = [
     "daphne",
+    "gunicorn",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -123,7 +124,7 @@ if not DEBUG:
             "IGNORE_EXCEPTIONS": True,
             "VERSION": 1,
             "OPTIONS": {
-                "PASSWORD": os.environ.get("REDIS_PASSWORD"),
+                "PASSWORD": os.environ.get("REDIS_PASSWORD", "Izual05140608Izual$"),
                 "SERIALIZER": "django_redis.serializers.pickle.PickleSerializer",
                 "COMPRESSOR": "django_redis.compressors.zlib.ZlibCompressor",
             },
@@ -167,7 +168,7 @@ if DB_ENGINE == "postgres":
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": 'vtorprice',  # os.environ["DB_NAME"],
+            "NAME": 'vtorprice_2',  # os.environ["DB_NAME"],
             "USER": 'postgres',  # 'vtorprice_user',#os.environ["DB_USER"],
             "PASSWORD": 'postgres',  # 'laUpqXR2*0lj',#os.environ["DB_PASSWORD"],
             "HOST": '127.0.0.1',  # 'laceloypuy.beget.app',#os.environ["DB_HOST"],
@@ -291,8 +292,7 @@ DADATA_API_KEY = os.getenv(
 # Yandex geocoder - used for retrieving many addresses when searching by it
 
 YANDEX_GEOCODER_API_KEY = os.getenv(
-    "YANDEX_GEOCODER_API_KEY", "a9115912-0552-45a7-a018-ce75622e0046"
-    # "YANDEX_GEOCODER_API_KEY", "7f8dce50-90f7-4c0f-8fdf-22ceadcac750"
+    "YANDEX_GEOCODER_API_KEY", "90bf0a8e-8e85-42c9-b8f6-b264cf884460"
 )
 YANDEX_GEOCODER_BASE_URL = "https://geocode-maps.yandex.ru"
 
@@ -312,6 +312,20 @@ else:
             },
         },
     }
+
+
+#LOGGING = {
+#    'version': 1,
+#    'handlers': {
+#        'console': {'class': 'logging.StreamHandler'}
+#    },
+#    'loggers': {
+#        'django.db.backends': {
+#            'handlers': ['console'],
+#            'level': 'DEBUG'
+#        }
+#    }
+#}
 
 # Value of NDS tax
 NDS_VALUE = os.getenv("NDS_VALUE", 20)

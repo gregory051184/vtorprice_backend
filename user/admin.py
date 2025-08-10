@@ -21,9 +21,9 @@ class UserAdmin(BaseUserAdmin):
         "date_joined",
         "phone",
     )
-    search_fields = ("first_name", "last_name", "email", "phone")
+    search_fields = ("first_name", "last_name", "email", "phone", "role")
     list_select_related = ("company",)
-    list_filter = ("is_active", "status")
+    list_filter = ("is_active", "status", "role")
     autocomplete_fields = ("company",)
     ordering = ("last_name",)
 

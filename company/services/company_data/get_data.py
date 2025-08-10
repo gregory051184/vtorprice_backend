@@ -19,18 +19,16 @@ def get_companies_data(query: str) -> Union[list[CompanyData], None]:
     """
 
     dadata = Dadata('8118fbfe3e47992be56928944189d122141017b9')  # (settings.DADATA_API_KEY)
-
     result = dadata.suggest("party", query)
     companies = []
-
     for item in result:
         data = item.get("data", None)
 
         if data is None:
             log.exception("DaData -- Incorrect data format")
             return None
-
         companies.append(CompanyData(**data))
+
 
 # Удалить
 # company_name_1 = CompanyName
@@ -70,6 +68,7 @@ def get_companies_data(query: str) -> Union[list[CompanyData], None]:
 #    }
 # ]
 # companies.append(company_1)
+
     return companies
 
 
@@ -82,6 +81,7 @@ def get_companies(query: str):  # -> Union[list[Company], None]:
     :param query: string containing INN or company name
     :return: list objects of Company model
     """
+
     # возвращает данные о компании/компаниях из сервиса dadata.ru
     companies_data = get_companies_data(query)
 

@@ -4,7 +4,6 @@ from rest_framework import serializers, exceptions
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.generics import get_object_or_404
 
-from chat.api.serializers import ChatSerializer
 from chat.models import Chat
 from common.serializers import (
     NonNullDynamicFieldsModelSerializer,
@@ -14,7 +13,7 @@ from common.serializers import (
 )
 from common.utils import generate_random_sequence
 from company.api.serializers import CompanySerializer, CreateMyCompanyMixin, CompanyForProposalAndSubscribeSerializer
-from company.models import Company
+from company.models import Company, City, CompanyActivityType, RecyclingCollectionType
 from exchange.models import (
     RecyclablesApplication,
     UrgencyType,
@@ -25,14 +24,13 @@ from exchange.models import (
     Review,
     EquipmentApplication,
     EquipmentDeal,
-    DealType, SpecialApplication, SpecialApps,
+    DealType, SpecialApplication, SpecialApps, ContractsStatisticsMark,
 )
 from exchange.utils import get_recyclables_application_total_weight
 from logistics.models import TransportApplication
 from product.api.serializers import (
     RecyclablesSerializer,
     EquipmentSerializer,
-    # RecyclingCodeSerializer,
 )
 from product.models import Recyclables
 from user.api.serializers import UserSerializer
@@ -63,10 +61,84 @@ class CreateDocumentModelSerializer(DynamicFieldsModelSerializer):
         fields = ("document", "name", "document_type")
 
 
+# Сериалайзеры для облегчения запроса на все объявления
+
+class CityForAllRecyclablesApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = City
+        fields = ("id", "latitude", "longitude", "name")
+
+
+class RecyclingCollectionTypeShortSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = RecyclingCollectionType
+        fields = ("activity",)
+
+
+class CompanyActivityTypeShortSerializer(NonNullDynamicFieldsModelSerializer):
+    rec_col_types = RecyclingCollectionTypeShortSerializer(many=True)
+
+    class Meta:
+        model = CompanyActivityType
+        fields = ("rec_col_types",)
+
+
+class CompanyForAllRecyclablesApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
+    activity_types = CompanyActivityTypeShortSerializer(many=True)
+    city = CityForAllRecyclablesApplicationsSerializer()
+    is_favorite = serializers.BooleanField(
+        read_only=True, required=False, default=False
+    )
+
+    class Meta:
+        model = Company
+        fields = ("id", "name", "city", "is_favorite", "activity_types")
+
+
+class RecyclableCategoryForAllRecyclablesApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = Recyclables
+        fields = ("id", "name")
+
+
+class RecyclableForAllRecyclablesApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
+    category = RecyclableCategoryForAllRecyclablesApplicationsSerializer()
+
+    class Meta:
+        model = Recyclables
+        fields = ("id", "name", "category")
+
+
+class AllRecyclablesApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
+    company = CompanyForAllRecyclablesApplicationsSerializer()
+    recyclables = RecyclableForAllRecyclablesApplicationsSerializer()
+    full_weigth = serializers.FloatField()
+    total_weight = serializers.FloatField()
+    total_price = serializers.DecimalField(max_digits=50, decimal_places=3)
+    is_favorite = serializers.BooleanField(
+        read_only=True, required=False, default=False
+    )
+
+    class Meta:
+        model = RecyclablesApplication
+        fields = (
+            "id", "deal_type", "urgency_type", "total_weight", "total_price", "created_at", "price", "company",
+            "recyclables", "is_deleted", "status", "full_weigth", "is_favorite", "with_nds",
+            "application_recyclable_status", "volume", "address")
+
+
+# _____________________________________________________________________________
+
+class SupplyContractsPricesForMedianPriceSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = RecyclablesApplication
+        fields = ("price",)
+
+
 class RecyclablesApplicationSerializer(NonNullDynamicFieldsModelSerializer):
     company = CompanySerializer(
         fields=("id", "name", "image", "average_review_rate", "status", "with_nds", "activity_types", "city",
-                "monthly_volume", "deals_count", "created_at", "is_favorite", "application_recyclable_status")
+                "monthly_volume", "deals_count", "created_at", "is_favorite", "application_recyclable_status"),
     )
     recyclables = RecyclablesSerializer()
     full_weigth = serializers.FloatField()
@@ -74,7 +146,6 @@ class RecyclablesApplicationSerializer(NonNullDynamicFieldsModelSerializer):
     total_price = serializers.DecimalField(max_digits=50, decimal_places=3)
     nds_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     images = ImageModelSerializer(fields=("id", "image"), many=True)
-
     is_favorite = serializers.BooleanField(
         read_only=True, required=False, default=False
     )
@@ -204,7 +275,7 @@ class EquipmentApplicationSerializer(NonNullDynamicFieldsModelSerializer):
         fields=("id", "name", "image", "average_review_rate", "status")
     )
     equipment = EquipmentSerializer()
-    price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    price = serializers.DecimalField(max_digits=13, decimal_places=2)
     nds_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     images = ImageModelSerializer(fields=("id", "image"), many=True)
 
@@ -667,13 +738,15 @@ class MatchingApplicationSerializer(serializers.Serializer):
 class SpecialSerializer(NonNullDynamicFieldsModelSerializer):
     companies = CompanyForProposalAndSubscribeSerializer(read_only=True, many=True)
     images = ImageModelSerializer(fields=("id", "image"), many=True)
-    #chat = ChatSerializer(read_only=True)
+
+    # chat = ChatSerializer(read_only=True)
 
     class Meta:
         model = SpecialApplication
         fields = (
-        'id', 'description', 'period', 'price', 'created_at', 'with_nds', 'images', 'companies', 'address', 'latitude',
-        'longitude', 'city', 'chat', 'is_deleted')
+            'id', 'description', 'period', 'price', 'created_at', 'with_nds', 'images', 'companies', 'address',
+            'latitude',
+            'longitude', 'city', 'chat', 'is_deleted')
 
 
 class SpecialApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
@@ -683,4 +756,28 @@ class SpecialApplicationsSerializer(NonNullDynamicFieldsModelSerializer):
     class Meta:
         model = SpecialApps
         fields = (
-        'id', 'payment_number', 'payment_access', 'time_begin', 'time_end', 'companies', 'special_application')
+            'id', 'payment_number', 'payment_access', 'time_begin', 'time_end', 'companies', 'special_application')
+
+
+# СЕРИАЛАЙЗЕРЫ ДЛЯ СОЗДАНИЯ СТАТИСТИКИ КОНТРАКТОВ НА ПОСТАВКУ
+class CompanyContractsStatisticsMarkSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = Company
+        fields = ('id', "name")
+
+
+class RecyclablesApplicationContractsStatisticsMarkSerializer(NonNullDynamicFieldsModelSerializer):
+    recyclables = RecyclableForAllRecyclablesApplicationsSerializer()
+
+    class Meta:
+        model = RecyclablesApplication
+        fields = ('id', "recyclables", "deal_type")
+
+
+class ContractsStatisticsMarkSerializer(NonNullDynamicFieldsModelSerializer):
+    company = CompanyContractsStatisticsMarkSerializer()
+    application = RecyclablesApplicationContractsStatisticsMarkSerializer
+
+    class Meta:
+        model = ContractsStatisticsMark
+        fields = ('id', "company", "application", "price")

@@ -90,7 +90,7 @@ class CompanyData(BaseModel):
     capital: str | None = None
     invalid: str | None = None
     fio: Person = None
-    management: CompanyManager = None
+    # management: CompanyManager = None
     founders: str | None = None
     managers: str | None = None
     predecessors: str | None = None

@@ -10,7 +10,7 @@ from common.serializers import (
     BaseCreateSerializer,
     LazyRefSerializer,
 )
-from user.models import UserRole
+from user.models import UserRole, UserActions
 from user.utils import get_all_permissions
 
 User = get_user_model()
@@ -40,6 +40,27 @@ class GroupSerializer(NonNullDynamicFieldsModelSerializer):
             ]
         )
         return {p: p in group_permissions for p in all_permissions}
+
+
+class UserForUserActionsSerializer(NonNullDynamicFieldsModelSerializer):
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "last_name",
+            "first_name",
+            "middle_name",
+            "phone",
+            "position",
+            "role",
+        )
+
+
+class UserActionsSerializer(NonNullDynamicFieldsModelSerializer):
+    user = UserForUserActionsSerializer()
+
+    class Meta:
+        model = UserActions
 
 
 class UserSerializer(NonNullDynamicFieldsModelSerializer):
